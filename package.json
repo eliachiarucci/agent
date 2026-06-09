@@ -1,0 +1,35 @@
+{
+  "name": "agent",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx build.ts",
+    "build": "tsx build.ts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.68",
+    "@ai-sdk/openai-compatible": "^2.0.48",
+    "ai": "^6.0.198",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "express": "^5.2.1",
+    "html-to-text": "^10.0.0",
+    "pg": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/html-to-text": "^9.0.4",
+    "@types/pg": "^8.20.0",
+    "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.22.4"
+  }
+}

@@ -1,0 +1,12 @@
+use_default_settings: true
+
+server:
+  secret_key: "93bc82843cc4e7b439bfb36daa72b4cd2f552205f75c2a2683e826fd7415ae0c"
+  # Internal instance, only reachable from the app — bot protection would
+  # block the JSON API requests our search tool makes.
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json

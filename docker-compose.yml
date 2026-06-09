@@ -1,0 +1,42 @@
+services:
+  app:
+    build: .
+    ports:
+      - "4125:3001"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/agent
+      - SEARXNG_URL=http://searxng:2026.6.8-f3fab143b
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./docker/searxng:/etc/searxng
+    restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/10-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
