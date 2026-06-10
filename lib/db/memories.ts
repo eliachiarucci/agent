@@ -1,4 +1,4 @@
-import { and, cosineDistance, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, cosineDistance, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../global/db";
 import { memories, type MemoryCategory } from "../global/schema";
 import { embedText } from "../global/ai";
@@ -23,6 +23,8 @@ export type FindMemoriesFilter = {
 export type SearchMemoriesOptions = {
   category?: MemoryCategory;
   limit?: number;
+  /** Floor on the cosine-similarity component alone, before recency/importance blending. */
+  minRelevance?: number;
 };
 
 // Retrieval score weights: relevance to the query, recency of last access, stored importance.
@@ -93,8 +95,9 @@ export async function searchMemories(
   const recency = sql<number>`exp(-ln(2.0) * extract(epoch from (now() - ${memories.lastAccessedAt})) / ${RECENCY_HALF_LIFE_SECONDS})`;
   const score = sql<number>`${WEIGHTS.relevance} * (${relevance}) + ${WEIGHTS.recency} * (${recency}) + ${WEIGHTS.importance} * ${memories.importance}`;
 
-  const conditions = [eq(memories.pinned, false)];
+  const conditions: SQL[] = [eq(memories.pinned, false)];
   if (options.category !== undefined) conditions.push(eq(memories.category, options.category));
+  if (options.minRelevance !== undefined) conditions.push(sql`${relevance} >= ${options.minRelevance}`);
 
   const rows = await db
     .select({ memory: memories, score })

@@ -10,7 +10,7 @@ import {
 import { z } from "zod";
 import { lmstudioChat } from "../../lib/global/ai";
 import { createMessage, deleteMessage, findMessage, findMessages, updateMessage } from "../../lib/db/conversations";
-import { buildMemorySystemPrompt, memoryTools } from "../../lib/agent/memory";
+import { buildMemorySystemPrompt, buildRelevantMemoriesBlock, memoryTools } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
 import type { StoredMessage } from "../../lib/global/schema";
 
@@ -20,6 +20,18 @@ function toUIMessages(stored: StoredMessage[]): UIMessage[] {
             ? m
             : { id: `legacy-${i}`, role: m.role, parts: [{ type: "text", text: m.content }] }
     );
+}
+
+// Recent turns plus the new message, so follow-ups like "what about her birthday?"
+// embed with enough context to retrieve anything. Injected <relevant-memories>
+// blocks are excluded to avoid retrieval feeding on its own previous output.
+function buildRetrievalQuery(history: UIMessage[], message: string): string {
+    const recent = history.slice(-4).flatMap((m) =>
+        m.parts.flatMap((p) =>
+            p.type === "text" && !p.text.startsWith("<relevant-memories>") ? [p.text] : []
+        )
+    );
+    return [...recent, message].join("\n").slice(-2000);
 }
 
 export const config = {}
@@ -48,9 +60,24 @@ export const POST: express.RequestHandler = async (req, res) => {
     const existing = conversation_id !== undefined ? await findMessage(conversation_id) : undefined;
     const history: UIMessage[] = existing ? toUIMessages(existing.messages ?? []) : [];
 
-    history.push({ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: message }] });
+    // Retrieved memories ride along with the user message instead of the system
+    // prompt: everything before this point in the prompt is then byte-identical to
+    // the previous request, so the server's KV cache stays valid across turns.
+    const [memoriesBlock, memorySystemPrompt] = await Promise.all([
+        buildRelevantMemoriesBlock(buildRetrievalQuery(history, message)),
+        buildMemorySystemPrompt(),
+    ]);
 
-    const system = [await buildMemorySystemPrompt(message), webSearchPrompt].join("\n\n");
+    history.push({
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [
+            ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
+            { type: "text", text: message },
+        ],
+    });
+
+    const system = [memorySystemPrompt, webSearchPrompt].join("\n\n");
     const tools = { ...memoryTools, ...searchTools };
 
     const result = streamText({

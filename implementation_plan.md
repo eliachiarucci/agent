@@ -8,3 +8,11 @@ Features to implement:
 - One click installer with curl download
 - Automatic updates and releases config
 - Move as many env as possible to DB
+- Status page with docker container status and logs
+- Log everything with Winston or something else
+- Context bar, compaction (strip memory RAG away)
+- Auth system with multiple users
+- Model selector
+- System prompt should save things saying "Elia has a fitbit air" instead of "I have a fitbit air"
+- Conversation should continue streaming if chat is changed
+- Add system prompts, how to deal with memory (if needs to ask question, maybe check memory first?)
