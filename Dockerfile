@@ -6,5 +6,6 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 COPY dist/ ./dist/
+COPY system-prompt.txt ./
 
 CMD ["node", "dist/index.js"]

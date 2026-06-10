@@ -12,6 +12,7 @@ import { lmstudioChat } from "../../lib/global/ai";
 import { createMessage, deleteMessage, findMessage, findMessages, updateMessage } from "../../lib/db/conversations";
 import { buildMemorySystemPrompt, buildRelevantMemoriesBlock, memoryTools } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
+import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
 
 function toUIMessages(stored: StoredMessage[]): UIMessage[] {
@@ -63,7 +64,8 @@ export const POST: express.RequestHandler = async (req, res) => {
     // Retrieved memories ride along with the user message instead of the system
     // prompt: everything before this point in the prompt is then byte-identical to
     // the previous request, so the server's KV cache stays valid across turns.
-    const [memoriesBlock, memorySystemPrompt] = await Promise.all([
+    const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
+        loadSystemPrompt(),
         buildRelevantMemoriesBlock(buildRetrievalQuery(history, message)),
         buildMemorySystemPrompt(),
     ]);
@@ -77,7 +79,9 @@ export const POST: express.RequestHandler = async (req, res) => {
         ],
     });
 
-    const system = [memorySystemPrompt, webSearchPrompt].join("\n\n");
+    const system = [basePrompt, memorySystemPrompt, webSearchPrompt]
+        .filter(Boolean)
+        .join("\n\n");
     const tools = { ...memoryTools, ...searchTools };
 
     const result = streamText({
@@ -97,6 +101,19 @@ export const POST: express.RequestHandler = async (req, res) => {
         originalMessages: history,
         sendReasoning: true,
         generateMessageId: () => crypto.randomUUID(),
+        // Each step's usage covers the full prompt (system + history + tools) of
+        // that request, so the last finish-step is the current context size. The
+        // UI reads it live from message metadata and it persists via onFinish.
+        messageMetadata: ({ part }) =>
+            part.type === "finish-step"
+                ? {
+                      usage: {
+                          inputTokens: part.usage.inputTokens,
+                          outputTokens: part.usage.outputTokens,
+                          totalTokens: part.usage.totalTokens,
+                      },
+                  }
+                : undefined,
         onError: (error) => (error instanceof Error ? error.message : "An error occurred."),
         onFinish: async ({ messages }) => {
             if (existing) {

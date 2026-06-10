@@ -13,6 +13,9 @@ export const lmstudioChat = createOpenAICompatible({
     name: "lmstudio",
     baseURL: "http://localhost:1234/v1",
     apiKey: "lm-studio",
+    // Ask for stream_options.include_usage so streamed steps carry token usage
+    // (the conversation route forwards it to the UI's context bar as metadata).
+    includeUsage: true,
 });
 
 // Output dimensions must match the vector column in lib/global/schema.ts (768).

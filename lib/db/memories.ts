@@ -1,4 +1,4 @@
-import { and, cosineDistance, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, cosineDistance, desc, eq, ilike, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../global/db";
 import { memories, type MemoryCategory } from "../global/schema";
 import { embedText } from "../global/ai";
@@ -18,6 +18,8 @@ export type FindMemoriesFilter = {
   category?: MemoryCategory;
   pinned?: boolean;
   limit?: number;
+  /** Case-insensitive substring match on content (for browsing UIs; the agent uses searchMemories). */
+  contains?: string;
 };
 
 export type SearchMemoriesOptions = {
@@ -73,6 +75,8 @@ export async function findMemories(filter: FindMemoriesFilter = {}): Promise<Mem
   const conditions = [];
   if (filter.category !== undefined) conditions.push(eq(memories.category, filter.category));
   if (filter.pinned !== undefined) conditions.push(eq(memories.pinned, filter.pinned));
+  if (filter.contains !== undefined)
+    conditions.push(ilike(memories.content, `%${filter.contains.replaceAll(/[%_\\]/g, "\\$&")}%`));
 
   return db.query.memories.findMany({
     where: conditions.length > 0 ? and(...conditions) : undefined,

@@ -5,7 +5,6 @@ import {
     createMemory,
     deleteMemory,
     findMemories,
-    searchMemories,
     updateMemory,
     type Memory,
 } from "../../lib/db/memories";
@@ -38,9 +37,10 @@ export const GET: express.RequestHandler = async (req, res) => {
 
     const { q, category, pinned, limit } = parsed.data;
 
-    const memories = q !== undefined
-        ? await searchMemories(q, { category, limit })
-        : await findMemories({ category, pinned, limit });
+    // Substring match rather than searchMemories: semantic search ranks every
+    // memory (useless as a browse filter) and bumps lastAccessedAt, which would
+    // let UI typing distort the agent's recency-weighted retrieval.
+    const memories = await findMemories({ contains: q, category, pinned, limit });
 
     res.json(memories.map(toJson));
 }
