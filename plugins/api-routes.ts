@@ -30,6 +30,9 @@ export const apiRoutesPlugin: Plugin = {
         contents: [...imports, `export const routes = [${entries.join(", ")}];`].join("\n"),
         loader: "ts",
         resolveDir: ".",
+        // Re-enumerate when files are added to/removed from api/ in watch mode;
+        // without this the route list is cached and new routes need a restart.
+        watchDirs: ["api", "api/agent"],
       };
     });
   },

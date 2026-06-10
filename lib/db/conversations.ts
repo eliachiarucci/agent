@@ -1,6 +1,6 @@
-import { and, between, eq, inArray } from "drizzle-orm";
+import { and, between, desc, eq, inArray, or } from "drizzle-orm";
 import { db } from "../global/db";
-import { conversations } from "../global/schema";
+import { agentMembers, conversations } from "../global/schema";
 
 export type NewConversation = typeof conversations.$inferInsert;
 export type Conversation = typeof conversations.$inferSelect;
@@ -9,6 +9,12 @@ export type FindMessagesFilter = {
   id?: string | string[];
   from?: Date;
   to?: Date;
+  agentId?: string;
+  /**
+   * Access scoping: only conversations in agents this user is a member of, and
+   * within those, only shared conversations or their own private ones.
+   */
+  viewerId?: string;
 };
 
 export async function createMessage(data: NewConversation): Promise<Conversation> {
@@ -42,6 +48,15 @@ export async function findMessage(id: string): Promise<Conversation | undefined>
   });
 }
 
+/** Can this user read (and chat in) this conversation? */
+export function canAccessConversation(
+  conversation: Conversation,
+  userId: string,
+  isMember: boolean
+): boolean {
+  return isMember && (conversation.shared || conversation.userId === userId);
+}
+
 export async function findMessages(filter: FindMessagesFilter = {}): Promise<Conversation[]> {
   const conditions = [];
 
@@ -61,7 +76,23 @@ export async function findMessages(filter: FindMessagesFilter = {}): Promise<Con
     conditions.push(between(conversations.createdAt, new Date(0), filter.to));
   }
 
+  if (filter.agentId !== undefined) {
+    conditions.push(eq(conversations.agentId, filter.agentId));
+  }
+
+  if (filter.viewerId !== undefined) {
+    const memberAgents = db
+      .select({ agentId: agentMembers.agentId })
+      .from(agentMembers)
+      .where(eq(agentMembers.userId, filter.viewerId));
+    conditions.push(inArray(conversations.agentId, memberAgents));
+    conditions.push(
+      or(eq(conversations.shared, true), eq(conversations.userId, filter.viewerId))!
+    );
+  }
+
   return db.query.conversations.findMany({
     where: conditions.length > 0 ? and(...conditions) : undefined,
+    orderBy: desc(conversations.updatedAt),
   });
 }

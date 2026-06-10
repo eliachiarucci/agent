@@ -6,7 +6,9 @@ const outfile = "dist/index.js";
 let server: ChildProcess | null = null;
 
 function restartServer() {
-  if (server) {
+  // A crashed server has already closed; waiting for its "close" event would
+  // wedge the watcher (every rebuild piles a listener on a dead process).
+  if (server && server.exitCode === null && !server.killed) {
     server.kill();
     server.once("close", launchServer);
   } else {

@@ -1,12 +1,17 @@
 import 'dotenv/config';
 import express from 'express';
+import { toNodeHandler } from 'better-auth/node';
 import { routes } from 'virtual:api-routes';
+import { auth } from './lib/global/auth';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 type HttpMethod = typeof HTTP_METHODS[number];
 
 const main = async () => {
     const app = express();
+    // Better Auth handles its own body parsing; mounting it before express.json()
+    // keeps the raw stream intact for its routes.
+    app.all('/agent/auth/*splat', toNodeHandler(auth));
     app.use(express.json());
     const PORT = process.env.PORT || 3001;
 

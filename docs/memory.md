@@ -1,6 +1,16 @@
 # Memory System
 
-The agent has a long-term memory: facts about the user (preferences, people, events, health details) stored in Postgres and surfaced to the model on every conversation turn. Storage is one fact per row with an embedding, so memories can be searched semantically (RAG-style) while keeping structured metadata like importance, category, and dates.
+The agent has a long-term memory: facts about its users (preferences, people, events, health details) stored in Postgres and surfaced to the model on every conversation turn. Storage is one fact per row with an embedding, so memories can be searched semantically (RAG-style) while keeping structured metadata like importance, category, and dates.
+
+## Multi-tenancy
+
+The system is multi-tenant: users own **agents**, and each agent has its own isolated memory pool. Owners can share an agent with other users (`agent_members`), which grants full access to its memories and shared conversations — sharing an agent means sharing its memory.
+
+- **Agents are the tenancy boundary.** Memories carry an `agent_id` and never cross agents; a freshly created or freshly shared agent knows nothing until told.
+- **Attribution inside a shared agent** is two-layered: facts are phrased in third person with names (`"Elia's car is a Golf 7"`, enforced by the tool prompts) *and* carry a structured `subject_user_id` (`NULL` = shared/group fact). Retrieval boosts the speaker's own and shared facts rather than hard-filtering, so "what's Anna's shoe size" still works for Elia.
+- **Conversations are private by default** (visible only to their creator). A conversation created with `shared: true` is visible to all agent members, and each user message in it is labeled with the speaker's name when sent to the model (the stored messages stay clean; labels are added deterministically at prompt-build time, so the KV cache stays valid).
+- **Speaker identity reaches the model differently per mode:** in a private conversation the system prompt names the single speaker (stable per conversation); in a shared one the system prompt stays speaker-neutral and the per-message labels carry identity.
+- **Auth:** the acting user always comes from the Better Auth session cookie (`lib/agent/actor.ts`); `agent_id` stays an optional request param, defaulting to the user's oldest agent. Signing up auto-creates a personal agent.
 
 ## Architecture
 
@@ -43,7 +53,10 @@ Memories live in the `memories` table ([lib/global/schema.ts](../lib/global/sche
 | Column             | Type          | Purpose                                                          |
 | ------------------ | ------------- | ---------------------------------------------------------------- |
 | `id`               | `uuid` (v7)   | Primary key; shown to the model so it can update/forget facts.   |
-| `content`          | `text`        | The fact as a short, self-contained sentence.                    |
+| `agent_id`         | `uuid`        | The agent this memory belongs to; memories never cross agents.   |
+| `subject_user_id`  | `uuid?`       | Who the fact is about; `NULL` = shared fact about the group.     |
+| `created_by`       | `uuid?`       | Which member stored the fact.                                    |
+| `content`          | `text`        | The fact as a short, third-person sentence naming the subject.   |
 | `embedding`        | `vector(768)` | pgvector embedding of `content`; HNSW index with cosine ops.     |
 | `importance`       | `real` (0–1)  | Retrieval ranking weight, assigned by the model when storing.    |
 | `category`         | `text`        | One of `MEMORY_CATEGORIES` (person, family, food, health, …).    |
@@ -61,12 +74,13 @@ Two deliberate design choices:
 `searchMemories` in [lib/db/memories.ts](../lib/db/memories.ts) ranks non-pinned memories with a blended score (the Stanford *Generative Agents* formulation):
 
 ```
-score = 0.6 × relevance + 0.2 × recency + 0.2 × importance
+score = 0.6 × relevance + 0.2 × recency + 0.2 × importance (+ 0.1 × subject-match)
 ```
 
 - **relevance** — cosine similarity between the query embedding and the memory embedding (`1 - cosine distance`).
 - **recency** — exponential decay on `last_accessed_at` with a **7-day half-life**: a memory touched today scores 1.0, a week ago 0.5, two weeks ago 0.25, and so on. Because retrieval touches `last_accessed_at`, frequently used memories stay "warm".
 - **importance** — the stored 0–1 score.
+- **subject-match** — additive bonus when a `speakerUserId` is passed: memories whose `subject_user_id` is the speaker or `NULL` (shared) get +0.1, so "my car" resolves to the speaker's car while other members' facts stay retrievable on explicit queries. Auto-recall also prefixes the embedded query with the speaker's name (`"Elia: …"`) so the asker's identity reaches the embedding itself.
 
 Weights and half-life are constants at the top of the file (`WEIGHTS`, `RECENCY_HALF_LIFE_SECONDS`) — tune them there. Pinned memories are excluded from search results since they are always in the prompt anyway.
 
@@ -76,31 +90,33 @@ The floor is a junk guard, not a precision filter: with the current embedding se
 
 ## Agent tools
 
-Defined in [lib/agent/memory.ts](../lib/agent/memory.ts) and attached to the conversation route with `stopWhen: stepCountIs(8)`:
+Built per request by `buildMemoryTools(scope)` in [lib/agent/memory.ts](../lib/agent/memory.ts) — the scope (`MemoryScope`) pins the agent, the speaker, and the member list, so every tool call stays inside one agent's pool — and attached to the conversation route with `stopWhen: stepCountIs(8)`:
 
 | Tool             | What it does                                                                  |
 | ---------------- | ----------------------------------------------------------------------------- |
-| `remember`       | Store a new fact (content, importance, category, optional pinned).            |
+| `remember`       | Store a new fact (third-person content, subject, importance, category, optional pinned). The `subject` field is an enum of member names plus `"shared"`, mapped to `subject_user_id` server-side. |
 | `updateMemory`   | Modify an existing memory by id; re-embeds automatically if content changes.  |
 | `forget`         | Permanently delete a memory by id.                                            |
-| `recallMemories` | Semantic search (optionally filtered by category), returns ids + content.     |
+| `recallMemories` | Semantic search (optionally filtered by category), returns ids + content; results are subject-boosted for the current speaker. |
 
 Two prompt builders live in the same file:
 
-- `buildMemorySystemPrompt()` assembles the stable system prompt: pinned memories plus the memory rules (store lasting facts, update instead of duplicating, treat `<relevant-memories>` blocks as machine-inserted, don't expose ids to the user). It takes no per-turn input by design — see the caching section above.
-- `buildRelevantMemoriesBlock(queryText)` runs the scored search (top 4 above the relevance floor) and returns the `<relevant-memories>` block prepended to the user message, or `null` when nothing relevant is found. Each memory is formatted with its id, category, and date so the model can reference them in tool calls. The query is built in [api/agent/conversation.ts](../api/agent/conversation.ts) from the last few turns plus the new message, so short follow-ups ("what about her birthday?") still retrieve well.
+- `buildMemorySystemPrompt(scope, { sharedConversation })` assembles the stable system prompt: who uses the agent (and who is speaking, in private conversations), pinned memories, and the memory rules (store lasting facts in third person with names, update instead of duplicating, treat `<relevant-memories>` blocks as machine-inserted, don't expose ids to the user). It takes no per-turn input by design — see the caching section above.
+- `buildRelevantMemoriesBlock(scope, queryText)` runs the scored search (top 4 above the relevance floor, speaker-prefixed query, subject boost) and returns the `<relevant-memories>` block prepended to the user message, or `null` when nothing relevant is found. Each memory is formatted with its id, category, and date so the model can reference them in tool calls. The query is built in [api/agent/conversation.ts](../api/agent/conversation.ts) from the last few turns plus the new message, so short follow-ups ("what about her birthday?") still retrieve well.
 
 ## REST API
 
-[api/agent/memory.ts](../api/agent/memory.ts) exposes memories for inspection and manual management. Embedding vectors are stripped from all responses.
+[api/agent/memory.ts](../api/agent/memory.ts) exposes memories for inspection and manual management. Embedding vectors are stripped from all responses. All routes require a session and take an optional `agent_id` (default: the user's oldest agent; the user must be a member).
 
 | Method   | Route                | Notes                                                                                     |
 | -------- | -------------------- | ----------------------------------------------------------------------------------------- |
 | `GET`    | `/agent/memory`      | List (newest first). Query params: `category`, `pinned`, `limit`.                          |
-| `GET`    | `/agent/memory?q=…`  | Semantic search using the blended score; same `category`/`limit` params.                   |
-| `POST`   | `/agent/memory`      | Body: `{ content, importance, category, pinned? }`. Embeds and stores.                     |
+| `GET`    | `/agent/memory?q=…`  | Substring browse filter; same `category`/`limit` params.                                   |
+| `POST`   | `/agent/memory`      | Body: `{ content, importance, category, pinned?, subject_user_id? }` (`null` = shared fact; defaults to the acting user). Embeds and stores. |
 | `PATCH`  | `/agent/memory`      | Body: `{ id, ...changes }`. Re-embeds if `content` changes.                                |
 | `DELETE` | `/agent/memory?id=…` | Deletes the memory.                                                                        |
+
+Agent and account management live in their own routes: `/agent/users` (GET/POST), `/agent/agents` (GET/POST/PATCH/DELETE, owner-only mutations), `/agent/members` (GET/POST/DELETE — sharing; owner-only adds, members can remove themselves). `/agent/conversation` accepts `agent_id`, `user_id`, and `shared` (creation only) and scopes GET/DELETE to what the user may see.
 
 Example:
 
