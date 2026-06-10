@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import * as esbuild from "esbuild";
 import { apiRoutesPlugin } from "../../plugins/api-routes.ts";
-import { TEST_APP_ORIGIN, TEST_AUTH_SECRET } from "../config";
+import { TEST_APP_ORIGIN, TEST_AUTH_SECRET, testFilesDir } from "../config";
 
 // Builds the real server (same esbuild pipeline as dev/prod, including the
 // virtual api-routes module) and runs it as a child process against the test
@@ -52,7 +53,11 @@ export async function startTestServer(options: {
     // Public signup is disabled in production (users are created via the CLI),
     // but test fixtures are built through real sign-ups over HTTP.
     AUTH_SIGNUP: "on",
+    // Conversation files go under dist/ (wiped here for a clean slate); tests
+    // reach the same folder via testFilesDir(port).
+    FILES_DIR: testFilesDir(options.port),
   };
+  rmSync(testFilesDir(options.port), { recursive: true, force: true });
   // Vitest exports these into its own environment; they must not leak in.
   delete env.TEST;
   delete env.VITEST;

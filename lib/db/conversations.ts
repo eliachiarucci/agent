@@ -57,6 +57,29 @@ export function canAccessConversation(
   return isMember && (conversation.shared || conversation.userId === userId);
 }
 
+/**
+ * Ids only — for the files API and conversation-folder cleanup, where loading
+ * the messages jsonb of every conversation would be wasteful. `viewerId`
+ * applies the same shared-or-own rule as findMessages; agent membership is the
+ * caller's job (resolveActor already checked it on the API paths).
+ */
+export async function findConversationIds(filter: {
+  agentId: string;
+  viewerId?: string;
+}): Promise<string[]> {
+  const conditions = [eq(conversations.agentId, filter.agentId)];
+  if (filter.viewerId !== undefined) {
+    conditions.push(
+      or(eq(conversations.shared, true), eq(conversations.userId, filter.viewerId))!
+    );
+  }
+  const rows = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(...conditions));
+  return rows.map((row) => row.id);
+}
+
 export async function findMessages(filter: FindMessagesFilter = {}): Promise<Conversation[]> {
   const conditions = [];
 

@@ -29,6 +29,7 @@ import {
     type MemoryScope,
 } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
+import { buildFileTools, filesPrompt, removeConversationFiles } from "../../lib/agent/files";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
 
@@ -210,10 +211,15 @@ export const POST: express.RequestHandler = async (req, res) => {
         ? `Instructions from this agent's owner:\n${agent.systemPrompt.trim()}`
         : "";
 
-    const system = [basePrompt, agentPrompt, memorySystemPrompt, webSearchPrompt]
+    const system = [basePrompt, agentPrompt, memorySystemPrompt, webSearchPrompt, filesPrompt]
         .filter(Boolean)
         .join("\n\n");
-    const tools = { ...buildMemoryTools(scope), ...searchTools };
+    // File tools are pinned to this conversation's folder (one folder per conversation).
+    const tools = {
+        ...buildMemoryTools(scope),
+        ...searchTools,
+        ...buildFileTools(conversationId),
+    };
 
     // Speaker labels only matter (and only stay stable) when several people can
     // write to the conversation; private chats keep the prompt unchanged.
@@ -332,5 +338,7 @@ export const DELETE: express.RequestHandler = async (req, res) => {
     }
 
     await deleteMessage(conversation.id);
+    // The conversation's file folder goes with it (no DB rows track files).
+    await removeConversationFiles(conversation.id);
     res.status(204).end();
 }

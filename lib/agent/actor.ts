@@ -5,6 +5,7 @@ import type express from "express";
 import { fromNodeHeaders } from "better-auth/node";
 import { auth } from "../global/auth";
 import { getAgent, getDefaultAgentForUser, isAgentMember, type Agent } from "../db/agents";
+import { canAccessConversation, findMessage, type Conversation } from "../db/conversations";
 
 export type SessionUser = { id: string; name: string };
 
@@ -40,4 +41,35 @@ export async function resolveActor(
   }
 
   return { ok: true, user, agent };
+}
+
+export type ConversationViewerResolution =
+  | { ok: true; user: SessionUser; conversation: Conversation }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Viewer access to a single conversation — the same rule as reading it in the
+ * chat: member of its agent, and the conversation is shared or the viewer's
+ * own. Used by the per-file routes (download, content).
+ */
+export async function resolveConversationViewer(
+  req: express.Request,
+  conversationId: string
+): Promise<ConversationViewerResolution> {
+  const user = await getSessionUser(req);
+  if (!user) {
+    return { ok: false, status: 401, error: "Not authenticated" };
+  }
+
+  const conversation = await findMessage(conversationId);
+  if (!conversation) {
+    return { ok: false, status: 404, error: "Conversation not found" };
+  }
+
+  const isMember = await isAgentMember(conversation.agentId, user.id);
+  if (!canAccessConversation(conversation, user.id, isMember)) {
+    return { ok: false, status: 403, error: "Not allowed to access this conversation" };
+  }
+
+  return { ok: true, user, conversation };
 }

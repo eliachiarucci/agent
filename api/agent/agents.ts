@@ -1,6 +1,8 @@
 import express from 'express';
 import { z } from "zod";
 import { getSessionUser } from "../../lib/agent/actor";
+import { removeConversationFiles } from "../../lib/agent/files";
+import { findConversationIds } from "../../lib/db/conversations";
 import {
     createAgent,
     deleteAgent,
@@ -116,6 +118,10 @@ export const DELETE: express.RequestHandler = async (req, res) => {
         return;
     }
 
+    // Conversation ids must be collected before the cascade wipes the rows;
+    // their file folders are not tracked in the database.
+    const conversationIds = await findConversationIds({ agentId: agent.id });
     await deleteAgent(agent.id);
+    await Promise.all(conversationIds.map(removeConversationFiles));
     res.status(204).end();
 }

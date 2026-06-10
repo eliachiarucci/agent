@@ -4,6 +4,9 @@ node_modules
 # Build output
 dist
 
+# Conversation files written by the agent in dev (FILES_DIR default)
+data
+
 # Environment variables
 .env
 .env.*

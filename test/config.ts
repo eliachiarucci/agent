@@ -20,6 +20,11 @@ export const SERVER_PORTS = { api: 3101, ai: 3102 } as const;
 export const serverUrl = (project: keyof typeof SERVER_PORTS) =>
   `http://localhost:${SERVER_PORTS[project]}`;
 
+// Conversation-file storage for spawned test servers (FILES_DIR). Per port so
+// api/ai runs don't collide; tests compute the same path to seed/inspect files
+// (both processes share the repo root as cwd).
+export const testFilesDir = (port: number) => `dist/test-files-${port}`;
+
 export const TEST_AUTH_SECRET = "vitest-only-secret-not-for-production";
 export const TEST_APP_ORIGIN = "http://localhost:5173";
 
