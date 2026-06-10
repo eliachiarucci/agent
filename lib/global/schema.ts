@@ -166,11 +166,11 @@ export const conversations = pgTable(
   (t) => [index("conversations_agent_idx").on(t.agentId)]
 );
 
-export const PROVIDER_TYPES = ["lmstudio", "anthropic"] as const;
+export const PROVIDER_TYPES = ["lmstudio", "anthropic", "google", "deepinfra"] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 // Connection settings per provider. Shapes are heterogeneous (LM Studio needs a
-// URL with an optional key, Anthropic only a key), so they live in one JSONB
+// URL with an optional key, Anthropic and Google only a key), so they live in one JSONB
 // blob validated per provider by zod at the API boundary (lib/global/providers.ts)
 // instead of a sparse set of nullable columns. `provider` stays a real column as
 // the discriminator/lookup key.

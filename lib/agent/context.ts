@@ -1,8 +1,8 @@
 // Context-window lookup. Providers report the window differently (LM Studio has
-// a bespoke REST API, Anthropic publishes per-model limits via /v1/models), so
-// the rest of the app only depends on getContextWindow().
+// a bespoke REST API, Anthropic and Google publish per-model limits via their
+// model endpoints), so the rest of the app only depends on getContextWindow().
 
-import { lmstudioBaseUrl } from "../global/providers";
+import { DEEPINFRA_BASE_URL, lmstudioBaseUrl } from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 
 export type ContextWindow = {
@@ -40,6 +40,29 @@ async function anthropicContextWindow(apiKey: string, model: string): Promise<nu
     return info.max_input_tokens ?? null;
 }
 
+// DeepInfra has no single-model endpoint; the full listing carries each model's
+// context_length in metadata. One fetch per cache TTL (see below) keeps it cheap.
+async function deepinfraContextWindow(apiKey: string, model: string): Promise<number | null> {
+    const res = await fetch(`${DEEPINFRA_BASE_URL}/models`, {
+        headers: { authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+        data?: Array<{ id?: string; metadata?: { context_length?: number } }>;
+    };
+    return body.data?.find((m) => m.id === model)?.metadata?.context_length ?? null;
+}
+
+async function googleContextWindow(apiKey: string, model: string): Promise<number | null> {
+    const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`,
+        { headers: { "x-goog-api-key": apiKey } }
+    );
+    if (!res.ok) return null;
+    const info = (await res.json()) as { inputTokenLimit?: number };
+    return info.inputTokenLimit ?? null;
+}
+
 // The window only changes when a model is (re)loaded; a short TTL keeps the UI
 // fresh without hitting the provider on every poll.
 const cache = new Map<string, { value: ContextWindow; expiresAt: number }>();
@@ -56,7 +79,11 @@ export async function getContextWindow(target?: ContextTarget): Promise<ContextW
 
     const contextLength = await (target?.provider === "anthropic"
         ? anthropicContextWindow(target.settings.apiKey ?? "", model)
-        : lmstudioContextWindow(baseUrl, model)
+        : target?.provider === "google"
+          ? googleContextWindow(target.settings.apiKey ?? "", model)
+          : target?.provider === "deepinfra"
+            ? deepinfraContextWindow(target.settings.apiKey ?? "", model)
+            : lmstudioContextWindow(baseUrl, model)
     ).catch(() => null);
 
     const value: ContextWindow = { model, contextLength };

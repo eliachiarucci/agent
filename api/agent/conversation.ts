@@ -223,8 +223,8 @@ export const POST: express.RequestHandler = async (req, res) => {
         ignoreIncompleteToolCalls: true,
     });
 
-    // Anthropic prompt caching is opt-in per request (unlike LM Studio's implicit
-    // KV reuse): two ephemeral breakpoints — one on the system block (tools render
+    // Anthropic prompt caching is opt-in per request (unlike LM Studio's and
+    // Gemini's implicit prefix caching): two ephemeral breakpoints — one on the system block (tools render
     // before system, so it caches both) and one on the newest message, so each
     // turn reads the whole prior conversation from cache (writes 1.25x, reads
     // 0.1x, 5-min TTL). The prompt prefix is already byte-stable across turns

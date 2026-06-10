@@ -78,6 +78,19 @@ describe("provider settings", () => {
       settings: {},
     });
     expect(noKey.status).toBe(400);
+
+    // So do Google and DeepInfra.
+    const noGoogleKey = await client.post("/agent/providers", {
+      provider: "google",
+      settings: {},
+    });
+    expect(noGoogleKey.status).toBe(400);
+
+    const noDeepInfraKey = await client.post("/agent/providers", {
+      provider: "deepinfra",
+      settings: {},
+    });
+    expect(noDeepInfraKey.status).toBe(400);
   });
 
   it("tests the connection and saves only on success", async () => {

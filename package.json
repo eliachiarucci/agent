@@ -21,6 +21,7 @@
   "license": "ISC",
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.82",
+    "@ai-sdk/google": "^3.0.80",
     "@ai-sdk/openai": "^3.0.68",
     "@ai-sdk/openai-compatible": "^2.0.48",
     "@better-auth/passkey": "^1.6.16",

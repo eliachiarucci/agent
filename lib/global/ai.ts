@@ -1,4 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { AutoModel, AutoTokenizer, env as transformersEnv, type PreTrainedModel, type PreTrainedTokenizer } from "@huggingface/transformers";
@@ -8,7 +9,7 @@ import { streamText } from "ai";
 // model would re-download on every recreation. Deployments point this at a
 // mounted volume.
 if (process.env.TRANSFORMERS_CACHE) transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE;
-import { lmstudioBaseUrl } from "./providers";
+import { DEEPINFRA_BASE_URL, lmstudioBaseUrl } from "./providers";
 import type { ProviderSettingsValue, ProviderType } from "./schema";
 
 export const lmstudio = createOpenAI({
@@ -43,6 +44,23 @@ export function chatModelFromSettings(
 ) {
     if (provider === "anthropic") {
         return createAnthropic({ apiKey: settings.apiKey })(modelId);
+    }
+    // Gemini 2.5+ caches implicitly on stable prompt prefixes (like LM Studio's
+    // KV reuse) — no per-request cacheControl opt-in like Anthropic's.
+    if (provider === "google") {
+        return createGoogleGenerativeAI({ apiKey: settings.apiKey })(modelId);
+    }
+    // DeepInfra speaks the OpenAI protocol, and the open models it hosts stream
+    // reasoning as reasoning_content — the same needs as LM Studio, so it shares
+    // the openai-compatible setup. Models tagged prompt_cache also cache
+    // implicitly by stable prefix.
+    if (provider === "deepinfra") {
+        return createOpenAICompatible({
+            name: "deepinfra",
+            baseURL: DEEPINFRA_BASE_URL,
+            apiKey: settings.apiKey,
+            includeUsage: true,
+        }).chatModel(modelId);
     }
     // Same openai-compatible setup as the default provider (reasoning_content
     // parsing + streamed usage), pointed at the user's LM Studio URL.
