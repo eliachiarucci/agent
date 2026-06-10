@@ -84,9 +84,9 @@ score = 0.6 × relevance + 0.2 × recency + 0.2 × importance (+ 0.1 × subject-
 
 Weights and half-life are constants at the top of the file (`WEIGHTS`, `RECENCY_HALF_LIFE_SECONDS`) — tune them there. Pinned memories are excluded from search results since they are always in the prompt anyway.
 
-Search accepts an optional `minRelevance` floor applied to the cosine-similarity component alone (before blending), so recency/importance can't surface memories unrelated to the query. Auto-injection uses it (`AUTO_RECALL_MIN_RELEVANCE = 0.45`, limit 4 in [lib/agent/memory.ts](../lib/agent/memory.ts)); the `recallMemories` tool does not, since an explicit search should return its best matches regardless.
+Search accepts an optional `minRelevance` floor applied to the cosine-similarity component alone (before blending), so recency/importance can't surface memories unrelated to the query. Auto-injection uses it (`AUTO_RECALL_MIN_RELEVANCE = 0.62`, limit 4 in [lib/agent/memory.ts](../lib/agent/memory.ts)); the `recallMemories` tool does not, since an explicit search should return its best matches regardless.
 
-The floor is a junk guard, not a precision filter: with the current embedding setup (nomic-embed without its `search_query:`/`search_document:` task prefixes), relevant memories measure ~0.50–0.59 cosine similarity and unrelated ones ~0.39–0.48, so the bands are too close for an aggressive threshold. Relative *ranking* is reliable (the right memory consistently sorts first); absolute scores are not. If sharper separation is ever needed, the fix is embedding with nomic's task prefixes — which raises scores roughly 0.1 across the board and **requires re-embedding every stored memory**.
+The floor is a junk guard, not a precision filter, and it is calibrated for the current embedding regime: EmbeddingGemma's task prefixes (search text embedded as a *query*, memories as *documents* — applied inside `embedText`, call sites just declare the side) plus speaker-prefixed query text (`"Elia: …"`) against third-person memories. Measured bands: unrelated queries ~0.35–0.45, direct hits ~0.53–0.69; `0.49` splits them with margin. Relative *ranking* is reliable (the right memory consistently sorts first); absolute scores are not. `test/ai/rag.test.ts` guards the calibration. If the model, dtype, or phrasing changes, re-measure with `npm run calibrate` (no database needed), update the constant, and **re-embed every stored memory** with `npm run reembed` — old and new vectors are not comparable.
 
 ## Agent tools
 
@@ -126,16 +126,20 @@ curl 'http://localhost:3001/agent/memory?q=what%20food%20does%20he%20like'
 
 ## Models and configuration
 
-Both models are served by LM Studio (`http://localhost:1234/v1`, configured in [lib/global/ai.ts](../lib/global/ai.ts)):
+The chat model is served by LM Studio (`http://localhost:1234/v1`); embeddings run **in-process** via transformers.js (ONNX on CPU) so memory works without LM Studio. Both are configured in [lib/global/ai.ts](../lib/global/ai.ts):
 
-| Env var           | Default                                | Used for                       |
-| ----------------- | -------------------------------------- | ------------------------------ |
-| `CHAT_MODEL`      | `google/gemma-4-e4b`                   | Conversation + memory tools.   |
-| `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding memories and queries.|
+| Env var           | Default                                  | Used for                       |
+| ----------------- | ---------------------------------------- | ------------------------------ |
+| `CHAT_MODEL`      | `google/gemma-4-e4b`                     | Conversation + memory tools.   |
+| `EMBEDDING_MODEL` | `onnx-community/embeddinggemma-300m-ONNX` | Embedding memories and queries (Hugging Face model id; downloaded and cached on first use, ~300MB). |
+| `EMBEDDING_DTYPE` | `q8`                                     | Embedding quantization: `fp32`, `q8`, or `q4` (EmbeddingGemma does not support fp16). q8 keeps the model under ~350MB resident for a ~0.3–1.0 MTEB-point cost. |
+| `TRANSFORMERS_CACHE` | transformers.js default (inside `node_modules`) | Where downloaded model files are cached. Point it at a mounted volume in containers so the model survives recreation. |
 
-Two constraints to keep in mind:
+Constraints to keep in mind:
 
-- The embedding model's output dimensions must match the `vector(768)` column. Switching to a model with different dimensions requires a schema change **and re-embedding every stored memory**.
+- The embedding model's output dimensions must match the `vector(768)` column. Switching models keeps the schema only if the new model also emits 768 dims (EmbeddingGemma does natively) — and **always requires `npm run reembed` plus recalibrating the relevance floor** (see above).
+- EmbeddingGemma is multilingual (~100 languages): an Italian query retrieves an English-phrased memory and vice versa — `test/ai/rag.test.ts` covers this.
+- The server warms the embedder at boot (`preloadEmbedder()`); the first request after a cold start on a fresh machine may still wait on the model download.
 - The chat model is called through `lmstudio.chat(...)` deliberately: the provider's default targets OpenAI's Responses API (`/v1/responses`), which LM Studio implements only partially — multi-step tool calls fail there. `.chat()` forces the Chat Completions API, which works.
 
 ## Database setup

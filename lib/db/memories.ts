@@ -45,7 +45,7 @@ const WEIGHTS = { relevance: 0.6, recency: 0.2, importance: 0.2, subject: 0.1 };
 const RECENCY_HALF_LIFE_SECONDS = 7 * 24 * 60 * 60;
 
 export async function createMemory(data: NewMemory): Promise<Memory> {
-  const embedding = await embedText(data.content);
+  const embedding = await embedText(data.content, "document");
   const [row] = await db
     .insert(memories)
     .values({ ...data, embedding })
@@ -59,7 +59,7 @@ export async function updateMemory(
   changes: MemoryChanges
 ): Promise<Memory | undefined> {
   const embedding =
-    changes.content !== undefined ? await embedText(changes.content) : undefined;
+    changes.content !== undefined ? await embedText(changes.content, "document") : undefined;
   const [row] = await db
     .update(memories)
     .set({ ...changes, ...(embedding ? { embedding } : {}) })
@@ -110,7 +110,7 @@ export async function searchMemories(
   query: string,
   options: SearchMemoriesOptions = {}
 ): Promise<Array<Memory & { score: number }>> {
-  const embedding = await embedText(query);
+  const embedding = await embedText(query, "query");
 
   const relevance = sql<number>`1 - (${cosineDistance(memories.embedding, embedding)})`;
   const recency = sql<number>`exp(-ln(2.0) * extract(epoch from (now() - ${memories.lastAccessedAt})) / ${RECENCY_HALF_LIFE_SECONDS})`;

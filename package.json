@@ -5,18 +5,26 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "tsx build.ts",
+    "dev": "tsx build.ts --watch",
     "build": "tsx build.ts",
     "db:push": "drizzle-kit push",
+    "users": "tsx scripts/users.ts",
+    "reembed": "tsx scripts/reembed.ts",
+    "calibrate": "tsx scripts/calibrate-embeddings.ts",
     "db:studio": "drizzle-kit studio",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run --project unit --project api",
+    "test:watch": "vitest --project unit --project api",
+    "test:ai": "vitest run --project ai",
+    "test:all": "vitest run"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.82",
     "@ai-sdk/openai": "^3.0.68",
     "@ai-sdk/openai-compatible": "^2.0.48",
     "@better-auth/passkey": "^1.6.16",
+    "@huggingface/transformers": "^4.2.0",
     "ai": "^6.0.198",
     "better-auth": "^1.6.16",
     "dotenv": "^17.4.2",
@@ -32,6 +40,7 @@
     "@types/pg": "^8.20.0",
     "drizzle-kit": "^0.31.10",
     "esbuild": "^0.28.0",
-    "tsx": "^4.22.4"
+    "tsx": "^4.22.4",
+    "vitest": "^4.1.8"
   }
 }

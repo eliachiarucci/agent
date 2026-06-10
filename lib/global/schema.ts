@@ -8,6 +8,7 @@ import {
   real,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
@@ -118,6 +119,9 @@ export const agents = pgTable("agents", {
     .notNull()
     .references(() => users.id),
   name: text("name").notNull(),
+  // Owner-written instructions appended to the built-in system prompt on every
+  // turn. Session-stable, so it doesn't break KV-cache reuse (docs/memory.md).
+  systemPrompt: text("system_prompt"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -160,6 +164,36 @@ export const conversations = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [index("conversations_agent_idx").on(t.agentId)]
+);
+
+export const PROVIDER_TYPES = ["lmstudio", "anthropic"] as const;
+export type ProviderType = (typeof PROVIDER_TYPES)[number];
+
+// Connection settings per provider. Shapes are heterogeneous (LM Studio needs a
+// URL with an optional key, Anthropic only a key), so they live in one JSONB
+// blob validated per provider by zod at the API boundary (lib/global/providers.ts)
+// instead of a sparse set of nullable columns. `provider` stays a real column as
+// the discriminator/lookup key.
+export type ProviderSettingsValue = {
+  url?: string;
+  apiKey?: string;
+  // Default chat model id for this provider, picked from its /models listing.
+  model?: string;
+};
+
+export const providerSettings = pgTable(
+  "provider_settings",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<ProviderType>().notNull(),
+    settings: jsonb("settings").notNull().$type<ProviderSettingsValue>(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("provider_settings_user_provider_idx").on(t.userId, t.provider)]
 );
 
 export const MEMORY_CATEGORIES = [

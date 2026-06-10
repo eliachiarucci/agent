@@ -1,0 +1,158 @@
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// searchMemories ranks with SQL using stored vectors, so scripting the vectors
+// scripts the relevance term exactly: same vector = cosine 1, different fake
+// seeds ≈ orthogonal ≈ 0. No LM Studio involved.
+const fixedEmbeddings = vi.hoisted(() => new Map<string, number[]>());
+vi.mock("../../lib/global/ai", async () => {
+  const { fakeEmbedding } = await import("../helpers/embeddings");
+  return {
+    embedText: async (text: string) => fixedEmbeddings.get(text) ?? fakeEmbedding(text),
+  };
+});
+
+import {
+  createMemory,
+  getPinnedMemories,
+  searchMemories,
+  updateMemory,
+} from "../../lib/db/memories";
+import { fakeEmbedding } from "../helpers/embeddings";
+import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
+
+const CAR_TOPIC = fakeEmbedding("topic:cars");
+
+beforeEach(async () => {
+  await resetDb();
+  fixedEmbeddings.clear();
+});
+afterAll(closeDb);
+
+async function carScenario() {
+  const elia = await makeUser("Elia");
+  const anna = await makeUser("Anna");
+  const { agent } = await makeUserWithAgent("Owner", [elia, anna]);
+
+  const facts = [
+    { content: "Elia's car is a Golf 7", subjectUserId: elia.id },
+    { content: "Anna's car is a Fiat Panda", subjectUserId: anna.id },
+    { content: "The kitchen renovation budget is 10000 euro", subjectUserId: null },
+  ];
+  for (const fact of facts) {
+    // Identical vectors: relevance/recency/importance all tie, so ranking is
+    // decided purely by the subject bonus under test.
+    fixedEmbeddings.set(fact.content, CAR_TOPIC);
+    await createMemory({ ...fact, agentId: agent.id, importance: 0.5, category: "other" });
+  }
+  fixedEmbeddings.set("my car", CAR_TOPIC);
+
+  return { elia, anna, agent };
+}
+
+describe("searchMemories subject boost", () => {
+  it("ranks other members' facts last on ambiguous queries, per speaker", async () => {
+    const { elia, anna, agent } = await carScenario();
+
+    const forElia = await searchMemories(agent.id, "my car", { speakerUserId: elia.id });
+    expect(forElia.map((m) => m.content).at(-1)).toBe("Anna's car is a Fiat Panda");
+
+    const forAnna = await searchMemories(agent.id, "my car", { speakerUserId: anna.id });
+    expect(forAnna.map((m) => m.content).at(-1)).toBe("Elia's car is a Golf 7");
+  });
+
+  it("boosts shared (subject-less) facts alongside the speaker's own", async () => {
+    const { elia, agent } = await carScenario();
+
+    const results = await searchMemories(agent.id, "my car", { speakerUserId: elia.id });
+    const topTwo = results.slice(0, 2).map((m) => m.content);
+    expect(topTwo).toContain("Elia's car is a Golf 7");
+    expect(topTwo).toContain("The kitchen renovation budget is 10000 euro");
+  });
+
+  it("applies no bonus when the speaker is unknown", async () => {
+    const { agent } = await carScenario();
+
+    const results = await searchMemories(agent.id, "my car");
+    const scores = results.map((m) => m.score);
+    // All three memories tie on every score component without the bonus.
+    expect(Math.max(...scores) - Math.min(...scores)).toBeLessThan(1e-6);
+  });
+});
+
+describe("searchMemories scoping and filters", () => {
+  it("never returns memories from another agent", async () => {
+    const { agent: agentA } = await makeUserWithAgent("Alice");
+    const { agent: agentB } = await makeUserWithAgent("Bob");
+
+    fixedEmbeddings.set("Bob's secret fact", CAR_TOPIC);
+    fixedEmbeddings.set("anything", CAR_TOPIC);
+    await createMemory({
+      agentId: agentB.id,
+      content: "Bob's secret fact",
+      importance: 0.9,
+      category: "other",
+    });
+
+    expect(await searchMemories(agentA.id, "anything")).toHaveLength(0);
+    expect(await searchMemories(agentB.id, "anything")).toHaveLength(1);
+  });
+
+  it("excludes pinned memories from search results (they are always in the prompt)", async () => {
+    const { agent } = await makeUserWithAgent("Alice");
+    fixedEmbeddings.set("Alice is allergic to peanuts", CAR_TOPIC);
+    fixedEmbeddings.set("allergies", CAR_TOPIC);
+    await createMemory({
+      agentId: agent.id,
+      content: "Alice is allergic to peanuts",
+      importance: 1,
+      category: "health",
+      pinned: true,
+    });
+
+    expect(await searchMemories(agent.id, "allergies")).toHaveLength(0);
+    expect(await getPinnedMemories(agent.id)).toHaveLength(1);
+  });
+
+  it("drops memories below the minRelevance floor", async () => {
+    const { agent } = await makeUserWithAgent("Alice");
+    // Different fake seeds are near-orthogonal: relevance ≈ 0 for the stray fact.
+    await createMemory({
+      agentId: agent.id,
+      content: "Alice's car is a Golf 7",
+      importance: 0.5,
+      category: "other",
+    });
+    await createMemory({
+      agentId: agent.id,
+      content: "Completely unrelated quantum chromodynamics trivia",
+      importance: 0.9,
+      category: "other",
+    });
+    fixedEmbeddings.set("what car does she drive", fakeEmbedding("Alice's car is a Golf 7"));
+
+    const results = await searchMemories(agent.id, "what car does she drive", {
+      minRelevance: 0.45,
+    });
+    expect(results.map((m) => m.content)).toEqual(["Alice's car is a Golf 7"]);
+  });
+});
+
+describe("updateMemory / cross-agent protection", () => {
+  it("re-embeds on content change and refuses cross-agent updates", async () => {
+    const { agent } = await makeUserWithAgent("Alice");
+    const { agent: otherAgent } = await makeUserWithAgent("Bob");
+    const memory = await createMemory({
+      agentId: agent.id,
+      content: "Alice's car is a Golf 7",
+      importance: 0.5,
+      category: "other",
+    });
+
+    // Scoped to the wrong agent: must not touch the row.
+    expect(await updateMemory(otherAgent.id, memory.id, { content: "hijacked" })).toBeUndefined();
+
+    const updated = await updateMemory(agent.id, memory.id, { content: "Alice's car is a Tesla" });
+    expect(updated?.content).toBe("Alice's car is a Tesla");
+    expect(updated?.embedding).not.toEqual(memory.embedding);
+  });
+});

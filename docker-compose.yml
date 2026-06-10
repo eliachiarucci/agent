@@ -7,14 +7,14 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgres://postgres:postgres@db:5432/agent
-      - SEARXNG_URL=http://searxng:2026.6.8-f3fab143b
+      - SEARXNG_URL=http://searxng:8080
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
   searxng:
-    image: searxng/searxng:latest
+    image: searxng/searxng:2026.6.8-f3fab143b
     ports:
       - "8888:8080"
     volumes:

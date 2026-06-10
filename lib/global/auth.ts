@@ -74,7 +74,16 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+    // Accounts are provisioned with the CLI (scripts/users.ts), not self-serve.
+    // The public sign-up endpoint stays closed unless AUTH_SIGNUP=on, which is
+    // set by the CLI itself and by the test server (test fixtures sign up for
+    // real to exercise the full Better Auth path).
+    disableSignUp: process.env.AUTH_SIGNUP !== "on",
   },
+  // Better Auth rate-limits auth endpoints outside dev. AUTH_RATE_LIMIT=off
+  // exists for the API test suite, which performs many sign-ups from one IP;
+  // anything else keeps the default limiter.
+  ...(process.env.AUTH_RATE_LIMIT === "off" ? { rateLimit: { enabled: false } } : {}),
   plugins: [
     username(),
     twoFactor(),

@@ -27,7 +27,7 @@ export async function getAgent(id: string): Promise<Agent | undefined> {
 
 export async function updateAgent(
   id: string,
-  changes: { name?: string }
+  changes: { name?: string; systemPrompt?: string | null }
 ): Promise<Agent | undefined> {
   const [row] = await db.update(agents).set(changes).where(eq(agents.id, id)).returning();
   return row;

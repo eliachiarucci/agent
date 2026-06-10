@@ -1,0 +1,8 @@
+node_modules
+dist
+test
+docs
+.env*
+.git
+.github
+implementation_plan.md

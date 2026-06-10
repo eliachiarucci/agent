@@ -1,13 +1,24 @@
 import 'dotenv/config';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { routes } from 'virtual:api-routes';
+import { preloadEmbedder } from './lib/global/ai';
 import { auth } from './lib/global/auth';
+import { db } from './lib/global/db';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 type HttpMethod = typeof HTTP_METHODS[number];
 
 const main = async () => {
+    // Containerized deployments set MIGRATE=on (committed migrations in
+    // drizzle/). Dev and test DBs are managed with `drizzle-kit push` instead,
+    // where migrate() would fail on already-existing tables — never set it there.
+    if (process.env.MIGRATE === 'on') {
+        await migrate(db, { migrationsFolder: 'drizzle' });
+        console.log('Database migrations are up to date');
+    }
+
     const app = express();
     // Better Auth handles its own body parsing; mounting it before express.json()
     // keeps the raw stream intact for its routes.
@@ -32,6 +43,9 @@ const main = async () => {
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
     });
+
+    // Warm up the in-process embedding model so the first turn isn't slow.
+    preloadEmbedder();
 };
 
 main().catch((error) => {

@@ -49,10 +49,16 @@ export const POST: express.RequestHandler = async (req, res) => {
     res.status(201).json(agent);
 }
 
-const updateSchema = z.object({
-    id: z.uuid(),
-    name: z.string().min(1),
-});
+const updateSchema = z
+    .object({
+        id: z.uuid(),
+        name: z.string().min(1).optional(),
+        // null/empty clears the prompt back to "no custom instructions".
+        system_prompt: z.string().nullable().optional(),
+    })
+    .refine((d) => d.name !== undefined || d.system_prompt !== undefined, {
+        message: "Nothing to update",
+    });
 
 export const PATCH: express.RequestHandler = async (req, res) => {
     const parsed = updateSchema.safeParse(req.body);
@@ -73,11 +79,17 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
     if (agent.ownerId !== user.id) {
-        res.status(403).json({ error: "Only the owner can rename an agent" });
+        res.status(403).json({ error: "Only the owner can update an agent" });
         return;
     }
 
-    res.json(await updateAgent(agent.id, { name: parsed.data.name }));
+    const { name, system_prompt } = parsed.data;
+    res.json(
+        await updateAgent(agent.id, {
+            ...(name !== undefined && { name }),
+            ...(system_prompt !== undefined && { systemPrompt: system_prompt?.trim() || null }),
+        })
+    );
 }
 
 // Deleting an agent cascades to its memories, conversations, and memberships.

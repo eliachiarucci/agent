@@ -2,7 +2,25 @@ import * as esbuild from "esbuild";
 import { spawn, type ChildProcess } from "child_process";
 import { apiRoutesPlugin } from "./plugins/api-routes.ts";
 
+const watch = process.argv.includes("--watch");
 const outfile = "dist/index.js";
+
+const options: esbuild.BuildOptions = {
+  entryPoints: { index: "index.ts", users: "scripts/users.ts" },
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  outdir: "dist",
+  packages: "external",
+  plugins: [apiRoutesPlugin],
+};
+
+if (!watch) {
+  await esbuild.build(options);
+  console.log("[build] wrote dist/index.js + dist/users.js");
+  process.exit(0);
+}
+
 let server: ChildProcess | null = null;
 
 function restartServer() {
@@ -24,14 +42,9 @@ function launchServer() {
 }
 
 const ctx = await esbuild.context({
-  entryPoints: ["index.ts"],
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outfile,
-  packages: "external",
+  ...options,
   plugins: [
-    apiRoutesPlugin,
+    ...(options.plugins ?? []),
     {
       name: "on-rebuild",
       setup(build) {

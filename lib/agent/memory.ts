@@ -185,13 +185,14 @@ export async function buildMemorySystemPrompt(
   return sections.join("\n\n");
 }
 
-// Junk guard only — when nothing clears it, the block is omitted entirely. With
-// unprefixed nomic-embed, measured cosine similarity runs ~0.50-0.59 for relevant
-// memories and ~0.39-0.48 for unrelated ones, so anything higher starts dropping
-// genuine hits (a floor of 0.5 silently filtered a 0.498 direct hit). Those ranges
-// were measured before speaker prefixes and third-person phrasing; re-measure if
-// retrieval starts missing or over-matching.
-const AUTO_RECALL_MIN_RELEVANCE = 0.45;
+// Junk guard only — when nothing clears it, the block is omitted entirely.
+// Calibrated for EmbeddingGemma's task prefixes (search text embedded as a
+// query, memories as documents — applied inside embedText) with speaker-
+// prefixed query text ("Elia: …") against third-person memories: unrelated
+// queries measure ~0.35-0.45 and direct hits ~0.53-0.69 (`npm run calibrate`).
+// 0.49 splits the bands with margin on both sides; test/ai/rag.test.ts guards
+// this calibration — re-measure if the embedding model or phrasing changes.
+const AUTO_RECALL_MIN_RELEVANCE = 0.49;
 const AUTO_RECALL_LIMIT = 4;
 
 export async function buildRelevantMemoriesBlock(
