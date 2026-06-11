@@ -4,6 +4,7 @@ import { toNodeHandler } from 'better-auth/node';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { routes } from 'virtual:api-routes';
 import { preloadEmbedder } from './lib/global/ai';
+import { startCronScheduler } from './lib/agent/cron';
 import { auth } from './lib/global/auth';
 import { db } from './lib/global/db';
 
@@ -46,6 +47,11 @@ const main = async () => {
 
     // Warm up the in-process embedding model so the first turn isn't slow.
     preloadEmbedder();
+
+    // Recurring jobs: polls for due cron jobs once a minute (CRON=off to disable).
+    if (process.env.CRON !== 'off') {
+        startCronScheduler();
+    }
 };
 
 main().catch((error) => {

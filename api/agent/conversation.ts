@@ -29,7 +29,9 @@ import {
     type MemoryScope,
 } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
+import { buildCronTools, buildCronToolsPrompt } from "../../lib/agent/cron-tools";
 import { buildFileTools, filesPrompt, removeConversationFiles } from "../../lib/agent/files";
+import { buildNoteTools, notesPrompt } from "../../lib/agent/notes";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
 
@@ -94,6 +96,9 @@ const bodySchema = z.object({
     // settings; omitted → the env-configured default model.
     provider: z.enum(PROVIDER_TYPES).optional(),
     model: z.string().min(1).optional(),
+    // The sender's IANA timezone; scheduling tools interpret times in it.
+    // Omitted → the server's timezone.
+    timezone: z.string().min(1).optional(),
 });
 
 export const POST: express.RequestHandler = async (req, res) => {
@@ -103,7 +108,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { message, conversation_id, agent_id, shared, provider, model } = parsed.data;
+    const { message, conversation_id, agent_id, shared, provider, model, timezone } = parsed.data;
 
     const user = await getSessionUser(req);
     if (!user) {
@@ -211,14 +216,36 @@ export const POST: express.RequestHandler = async (req, res) => {
         ? `Instructions from this agent's owner:\n${agent.systemPrompt.trim()}`
         : "";
 
-    const system = [basePrompt, agentPrompt, memorySystemPrompt, webSearchPrompt, filesPrompt]
+    // Scheduling tools work in the sender's timezone and pin new jobs to the
+    // model this chat runs on. Stable per session (the client sends the same
+    // timezone every turn), so the prompt prefix stays KV-cache friendly.
+    const cronScope = {
+        agentId,
+        userId: user.id,
+        timezone: timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        provider,
+        model,
+    };
+
+    const system = [
+        basePrompt,
+        agentPrompt,
+        memorySystemPrompt,
+        webSearchPrompt,
+        filesPrompt,
+        notesPrompt,
+        buildCronToolsPrompt(cronScope.timezone),
+    ]
         .filter(Boolean)
         .join("\n\n");
-    // File tools are pinned to this conversation's folder (one folder per conversation).
+    // File tools are pinned to this conversation's folder (one folder per
+    // conversation); note tools to the agent's shared notes.
     const tools = {
         ...buildMemoryTools(scope),
         ...searchTools,
         ...buildFileTools(conversationId),
+        ...buildNoteTools(agentId, user.id),
+        ...buildCronTools(cronScope),
     };
 
     // Speaker labels only matter (and only stay stable) when several people can

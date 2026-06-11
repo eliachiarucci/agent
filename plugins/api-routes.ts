@@ -32,7 +32,7 @@ export const apiRoutesPlugin: Plugin = {
         resolveDir: ".",
         // Re-enumerate when files are added to/removed from api/ in watch mode;
         // without this the route list is cached and new routes need a restart.
-        watchDirs: ["api", "api/agent"],
+        watchDirs: ["api", "api/agent", "api/agent/files", "api/agent/jobs"],
       };
     });
   },

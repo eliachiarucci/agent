@@ -44,13 +44,34 @@ export type SearchMemoriesOptions = {
 const WEIGHTS = { relevance: 0.6, recency: 0.2, importance: 0.2, subject: 0.1 };
 const RECENCY_HALF_LIFE_SECONDS = 7 * 24 * 60 * 60;
 
-export async function createMemory(data: NewMemory): Promise<Memory> {
-  const embedding = await embedText(data.content, "document");
+export async function createMemory(data: NewMemory, embedding?: number[]): Promise<Memory> {
+  const vector = embedding ?? (await embedText(data.content, "document"));
   const [row] = await db
     .insert(memories)
-    .values({ ...data, embedding })
+    .values({ ...data, embedding: vector })
     .returning();
   return row;
+}
+
+/**
+ * Nearest stored memories by plain cosine similarity against a precomputed
+ * document embedding — the duplicate check behind the remember tool. No
+ * recency/importance blending, no lastAccessedAt touch, and pinned memories
+ * are included: a duplicate of a pinned fact is still a duplicate.
+ */
+export async function findSimilarMemories(
+  agentId: string,
+  embedding: number[],
+  options: { minSimilarity: number; limit?: number }
+): Promise<Array<Memory & { similarity: number }>> {
+  const similarity = sql<number>`1 - (${cosineDistance(memories.embedding, embedding)})`;
+  const rows = await db
+    .select({ memory: memories, similarity })
+    .from(memories)
+    .where(and(eq(memories.agentId, agentId), sql`${similarity} >= ${options.minSimilarity}`))
+    .orderBy(desc(similarity))
+    .limit(options.limit ?? 3);
+  return rows.map((r) => ({ ...r.memory, similarity: Number(r.similarity) }));
 }
 
 export async function updateMemory(

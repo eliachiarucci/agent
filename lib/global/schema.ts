@@ -196,6 +196,107 @@ export const providerSettings = pgTable(
   (t) => [uniqueIndex("provider_settings_user_provider_idx").on(t.userId, t.provider)]
 );
 
+// "once" jobs (reminders) are deleted after their first successful run.
+export const CRON_RECURRENCES = ["once", "weekly", "biweekly", "monthly"] as const;
+export type CronRecurrence = (typeof CRON_RECURRENCES)[number];
+
+// A recurring prompt: at each scheduled occurrence the runner executes `prompt`
+// against the agent as the creating user and saves the result as a new private
+// conversation. The schedule is wall-clock (`dayOfWeek` + `time` in `timezone`,
+// as picked in the UI); `nextRunAt` is the precomputed absolute instant the
+// scheduler polls on (lib/agent/cron.ts).
+export const cronJobs = pgTable(
+  "cron_jobs",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    // Creator: runs execute with their identity and memory scope.
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Display name. NULL → the runner generates one on the job's next run.
+    title: text("title"),
+    prompt: text("prompt").notNull(),
+    // 0 = Sunday … 6 = Saturday, matching JS Date#getDay(). At least one day.
+    daysOfWeek: integer("days_of_week").array().notNull(),
+    // "HH:MM", wall clock in `timezone`.
+    time: text("time").notNull(),
+    recurrence: text("recurrence").$type<CronRecurrence>().notNull(),
+    // Chat model the runs use, resolved against the creator's provider
+    // settings like a chat request; NULL → the env-configured default model.
+    provider: text("provider").$type<ProviderType>(),
+    model: text("model"),
+    // IANA name (e.g. "Europe/Rome") captured from the creator's browser.
+    timezone: text("timezone").notNull(),
+    nextRunAt: timestamp("next_run_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("cron_jobs_next_run_idx").on(t.nextRunAt),
+    index("cron_jobs_user_idx").on(t.userId),
+  ]
+);
+
+export const CRON_RUN_STATUSES = ["success", "error"] as const;
+export type CronRunStatus = (typeof CRON_RUN_STATUSES)[number];
+
+// Run history is self-contained (own user/agent/prompt copies): deleting a
+// job — which "once" jobs do automatically after succeeding — must not erase
+// the record that it ran.
+export const cronJobRuns = pgTable(
+  "cron_job_runs",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    jobId: uuid("job_id").references(() => cronJobs.id, { onDelete: "set null" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    // Job title at run time (may have just been generated); display falls
+    // back to the prompt when NULL.
+    title: text("title"),
+    prompt: text("prompt").notNull(),
+    // The conversation holding the run's prompt + response. Kept when the
+    // conversation is deleted (the run record stays meaningful on its own).
+    conversationId: uuid("conversation_id").references(() => conversations.id, {
+      onDelete: "set null",
+    }),
+    status: text("status").$type<CronRunStatus>().notNull(),
+    error: text("error"),
+    startedAt: timestamp("started_at").notNull(),
+    finishedAt: timestamp("finished_at").notNull(),
+  },
+  (t) => [
+    index("cron_job_runs_job_idx").on(t.jobId),
+    index("cron_job_runs_user_idx").on(t.userId),
+  ]
+);
+
+// Free-form notes shared across every conversation of an agent: any member can
+// read and edit them (in chat via the note tools, or manually in the UI), so
+// they hold living documents — lists, plans, reference info — rather than the
+// per-conversation artifacts files cover. Titles are the agent-facing handle,
+// hence unique per agent.
+export const notes = pgTable(
+  "notes",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    content: text("content").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("notes_agent_title_idx").on(t.agentId, t.title)]
+);
+
 export const MEMORY_CATEGORIES = [
   "person",
   "family",

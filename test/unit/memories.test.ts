@@ -13,10 +13,13 @@ vi.mock("../../lib/global/ai", async () => {
 
 import {
   createMemory,
+  findMemories,
+  findSimilarMemories,
   getPinnedMemories,
   searchMemories,
   updateMemory,
 } from "../../lib/db/memories";
+import { buildMemoryTools, type MemoryScope } from "../../lib/agent/memory";
 import { fakeEmbedding } from "../helpers/embeddings";
 import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
 
@@ -134,6 +137,105 @@ describe("searchMemories scoping and filters", () => {
       minRelevance: 0.45,
     });
     expect(results.map((m) => m.content)).toEqual(["Alice's car is a Golf 7"]);
+  });
+});
+
+describe("findSimilarMemories", () => {
+  it("returns memories above the floor, scoped to the agent, including pinned", async () => {
+    const { agent } = await makeUserWithAgent("Alice");
+    const { agent: other } = await makeUserWithAgent("Bob");
+    await createMemory({
+      agentId: agent.id,
+      content: "Alice's car is a Golf 7",
+      importance: 0.5,
+      category: "other",
+      pinned: true,
+    });
+    await createMemory({
+      agentId: agent.id,
+      content: "Completely unrelated quantum chromodynamics trivia",
+      importance: 0.5,
+      category: "other",
+    });
+
+    // Same seed = identical vector: similarity 1; other seeds ≈ orthogonal.
+    const probe = fakeEmbedding("Alice's car is a Golf 7");
+    const hits = await findSimilarMemories(agent.id, probe, { minSimilarity: 0.8 });
+    expect(hits.map((m) => m.content)).toEqual(["Alice's car is a Golf 7"]);
+    expect(hits[0].similarity).toBeCloseTo(1, 5);
+
+    expect(await findSimilarMemories(other.id, probe, { minSimilarity: 0.8 })).toHaveLength(0);
+  });
+});
+
+describe("remember tool duplicate guard", () => {
+  const callOptions = { toolCallId: "test", messages: [] };
+
+  async function rememberScenario() {
+    const { user, agent } = await makeUserWithAgent("Alice");
+    const scope: MemoryScope = {
+      agentId: agent.id,
+      speaker: { id: user.id, name: "Alice" },
+      members: [{ userId: user.id, name: "Alice", role: "member" }],
+    };
+    const existing = await createMemory({
+      agentId: agent.id,
+      content: "Alice's car is a Golf 7",
+      subjectUserId: user.id,
+      importance: 0.5,
+      category: "other",
+    });
+    // The paraphrase embeds to the same vector: cosine 1, above any floor.
+    fixedEmbeddings.set("Alice drives a Golf 7", fakeEmbedding("Alice's car is a Golf 7"));
+    return { agent, existing, tools: buildMemoryTools(scope) };
+  }
+
+  it("refuses a near-duplicate and returns the existing memory's id", async () => {
+    const { agent, existing, tools } = await rememberScenario();
+
+    const result = (await tools.remember.execute!(
+      { content: "Alice drives a Golf 7", subject: "Alice", importance: 0.5, category: "other" },
+      callOptions
+    )) as { stored: boolean; similar: Array<{ id: string }> };
+
+    expect(result.stored).toBe(false);
+    expect(result.similar.map((m) => m.id)).toContain(existing.id);
+    expect(await findMemories(agent.id)).toHaveLength(1);
+  });
+
+  it("stores anyway when allowDuplicate is set", async () => {
+    const { agent, tools } = await rememberScenario();
+
+    const result = (await tools.remember.execute!(
+      {
+        content: "Alice drives a Golf 7",
+        subject: "Alice",
+        importance: 0.5,
+        category: "other",
+        allowDuplicate: true,
+      },
+      callOptions
+    )) as { id: string };
+
+    expect(result.id).toBeDefined();
+    expect(await findMemories(agent.id)).toHaveLength(2);
+  });
+
+  it("stores distinct facts without tripping the guard", async () => {
+    const { agent, tools } = await rememberScenario();
+
+    const result = (await tools.remember.execute!(
+      {
+        content: "Alice's favourite food is carbonara",
+        subject: "Alice",
+        importance: 0.5,
+        category: "food",
+      },
+      callOptions
+    )) as { id: string; stored: string };
+
+    expect(result.stored).toBe("Alice's favourite food is carbonara");
+    expect(await findMemories(agent.id)).toHaveLength(2);
   });
 });
 

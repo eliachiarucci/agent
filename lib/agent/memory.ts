@@ -5,11 +5,13 @@ import type { AgentMember } from "../db/agents";
 import {
   createMemory,
   deleteMemory,
+  findSimilarMemories,
   getPinnedMemories,
   searchMemories,
   updateMemory,
   type Memory,
 } from "../db/memories";
+import { embedText } from "../global/ai";
 
 const categorySchema = z.enum(MEMORY_CATEGORIES);
 
@@ -25,6 +27,15 @@ export type MemoryScope = {
 };
 
 const SHARED_SUBJECT = "shared" as const;
+
+// Duplicate guard for the remember tool: document-vs-document cosine between
+// the candidate content and stored memories (both sides embedded as kind
+// "document" — these are NOT the query/document bands behind
+// AUTO_RECALL_MIN_RELEVANCE). Measured with `npm run calibrate`: paraphrases
+// and contradicting updates of the same fact ~0.84-0.98, distinct facts —
+// including same-shaped facts about another member — ~0.54-0.75. 0.80 splits
+// the bands with margin; test/ai/rag.test.ts guards this calibration.
+const DUPLICATE_MIN_SIMILARITY = 0.8;
 
 function subjectSchema(scope: MemoryScope) {
   return z
@@ -68,14 +79,37 @@ export function buildMemoryTools(scope: MemoryScope) {
           .describe(
             "Set true ONLY for facts that must be present in every conversation (e.g. a member's name, severe allergies). Use sparingly."
           ),
+        allowDuplicate: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true ONLY after a previous remember call reported similar existing memories and you decided the new fact is genuinely distinct from all of them."
+          ),
       }),
-      execute: async ({ subject, ...input }) => {
-        const memory = await createMemory({
-          ...input,
-          agentId: scope.agentId,
-          subjectUserId: subjectToUserId(scope, subject),
-          createdBy: scope.speaker.id,
-        });
+      execute: async ({ subject, allowDuplicate, ...input }) => {
+        const embedding = await embedText(input.content, "document");
+        if (!allowDuplicate) {
+          const similar = await findSimilarMemories(scope.agentId, embedding, {
+            minSimilarity: DUPLICATE_MIN_SIMILARITY,
+          });
+          if (similar.length > 0) {
+            return {
+              stored: false,
+              similar: similar.map((m) => ({ id: m.id, content: m.content })),
+              message:
+                "Not stored: these existing memories look like the same fact. If the fact changed, call updateMemory with the id; if it is already stored, do nothing; only if it is genuinely a different fact, call remember again with allowDuplicate: true.",
+            };
+          }
+        }
+        const memory = await createMemory(
+          {
+            ...input,
+            agentId: scope.agentId,
+            subjectUserId: subjectToUserId(scope, subject),
+            createdBy: scope.speaker.id,
+          },
+          embedding
+        );
         return { id: memory.id, stored: memory.content };
       },
     }),

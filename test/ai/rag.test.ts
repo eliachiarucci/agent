@@ -1,7 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
-import { createMemory, searchMemories } from "../../lib/db/memories";
-import { buildRelevantMemoriesBlock, type MemoryScope } from "../../lib/agent/memory";
+import { createMemory, findSimilarMemories, searchMemories } from "../../lib/db/memories";
+import { embedText } from "../../lib/global/ai";
+import {
+  buildMemoryTools,
+  buildRelevantMemoriesBlock,
+  type MemoryScope,
+} from "../../lib/agent/memory";
 
 // Real EmbeddingGemma embeddings, in-process — no LM Studio involved (the
 // first-ever run downloads the model, ~300MB). Embeddings for fixed text are
@@ -77,6 +82,60 @@ describe("RAG retrieval with real embeddings", () => {
       speakerUserId: elia.id,
     });
     expect(results[0].content).toBe("Elia's favourite food is carbonara");
+  });
+
+  it("duplicate guard trips on paraphrases and contradictions, not on distinct facts", async () => {
+    const { elia, agent } = await householdScenario();
+
+    // Doc-vs-doc bands behind DUPLICATE_MIN_SIMILARITY (lib/agent/memory.ts):
+    // paraphrases and changed-value updates of a stored fact must clear the
+    // threshold, distinct facts must not. A failure here usually means the
+    // calibration drifted — re-measure with `npm run calibrate`.
+    const paraphrase = await embedText("Elia drives a Volkswagen Golf 7", "document");
+    expect(
+      (await findSimilarMemories(agent.id, paraphrase, { minSimilarity: 0.8 })).map(
+        (m) => m.content
+      )
+    ).toContain("Elia's car is a Golf 7");
+
+    const contradiction = await embedText("Elia's car is a Tesla Model 3", "document");
+    expect(
+      (await findSimilarMemories(agent.id, contradiction, { minSimilarity: 0.8 })).map(
+        (m) => m.content
+      )
+    ).toContain("Elia's car is a Golf 7");
+
+    // Same-shaped fact about another member, and a new fact about the same
+    // member: both must store freely.
+    const otherMember = await embedText("Elia's car is a Golf 7", "document");
+    const hits = await findSimilarMemories(agent.id, otherMember, { minSimilarity: 0.8 });
+    expect(hits.map((m) => m.content)).not.toContain("Anna's car is a Fiat Panda");
+
+    const newFact = await embedText("Elia plays tennis on Thursdays", "document");
+    expect(await findSimilarMemories(agent.id, newFact, { minSimilarity: 0.8 })).toHaveLength(0);
+
+    // End-to-end through the tool: the paraphrase is refused with the
+    // existing memory's id, the distinct fact is stored.
+    const scope: MemoryScope = {
+      agentId: agent.id,
+      speaker: { id: elia.id, name: "Elia" },
+      members: [{ userId: elia.id, name: "Elia", role: "member" }],
+    };
+    const tools = buildMemoryTools(scope);
+    const callOptions = { toolCallId: "test", messages: [] };
+
+    const refused = (await tools.remember.execute!(
+      { content: "Elia drives a Volkswagen Golf 7", subject: "Elia", importance: 0.5, category: "other" },
+      callOptions
+    )) as { stored: boolean; similar: Array<{ content: string }> };
+    expect(refused.stored).toBe(false);
+    expect(refused.similar.map((m) => m.content)).toContain("Elia's car is a Golf 7");
+
+    const storedResult = (await tools.remember.execute!(
+      { content: "Elia plays tennis on Thursdays", subject: "Elia", importance: 0.5, category: "preference" },
+      callOptions
+    )) as { id: string; stored: string };
+    expect(storedResult.stored).toBe("Elia plays tennis on Thursdays");
   });
 
   it("auto-recall injects relevant memories and stays silent on unrelated queries", async () => {

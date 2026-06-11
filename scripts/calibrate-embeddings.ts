@@ -63,4 +63,56 @@ for (const query of unrelated) {
 console.log(`\nDirect-hit floor:   ${hitFloor.toFixed(3)}`);
 console.log(`Unrelated ceiling:  ${junkCeiling.toFixed(3)}`);
 console.log(`Midpoint:           ${((hitFloor + junkCeiling) / 2).toFixed(3)}`);
+
+// ── Duplicate guard (DUPLICATE_MIN_SIMILARITY, lib/agent/memory.ts) ──────────
+// Document-vs-document cosine: a candidate `remember` content against stored
+// memories. Both sides embed as kind "document", so these bands are NOT the
+// query/document bands above. Duplicates (paraphrases and contradicting
+// updates of the same fact) must land above the threshold, distinct facts —
+// including same-shaped facts about another person — below it.
+
+// Same fact reworded, or same fact with a changed value (the update case).
+const duplicatePairs: Array<[string, string]> = [
+  ["Elia's car is a Golf 7", "Elia drives a Volkswagen Golf 7"],
+  ["Elia's favourite food is carbonara", "Elia's favourite dish is carbonara"],
+  ["Anna is allergic to peanuts", "Anna has a peanut allergy"],
+  ["The kitchen renovation budget is 10000 euro", "The budget for the kitchen renovation is €10,000"],
+  ["Elia's car is a Golf 7", "Elia's car is a Tesla Model 3"],
+  ["The kitchen renovation budget is 10000 euro", "The kitchen renovation budget is 15000 euro"],
+];
+
+// Genuinely different facts, including the adversarial cases: same fact shape
+// about a different member, and different facts about the same member.
+const distinctPairs: Array<[string, string]> = [
+  ["Elia's car is a Golf 7", "Anna's car is a Fiat Panda"],
+  ["Elia's car is a Golf 7", "Elia's favourite food is carbonara"],
+  ["Anna's car is a Fiat Panda", "Anna's bike is a Bianchi"],
+  ["Elia works as a software engineer", "Elia plays tennis on Thursdays"],
+  ["Elia's daughter is named Sofia", "Elia's dog is named Rex"],
+];
+
+async function docPairSimilarity([a, b]: [string, string]): Promise<number> {
+  const [va, vb] = await Promise.all([embedText(a, "document"), embedText(b, "document")]);
+  return cosine(va, vb);
+}
+
+console.log("\nDuplicate pairs (paraphrases / contradicting updates, doc-vs-doc):");
+let duplicateFloor = Infinity;
+for (const pair of duplicatePairs) {
+  const sim = await docPairSimilarity(pair);
+  duplicateFloor = Math.min(duplicateFloor, sim);
+  console.log(`  ${sim.toFixed(3)}  ${pair[0]}  ↔  ${pair[1]}`);
+}
+
+console.log("Distinct pairs (must not trip the guard):");
+let distinctCeiling = -Infinity;
+for (const pair of distinctPairs) {
+  const sim = await docPairSimilarity(pair);
+  distinctCeiling = Math.max(distinctCeiling, sim);
+  console.log(`  ${sim.toFixed(3)}  ${pair[0]}  ↔  ${pair[1]}`);
+}
+
+console.log(`\nDuplicate floor:    ${duplicateFloor.toFixed(3)}`);
+console.log(`Distinct ceiling:   ${distinctCeiling.toFixed(3)}`);
+console.log(`Midpoint:           ${((duplicateFloor + distinctCeiling) / 2).toFixed(3)}`);
 process.exit(0);

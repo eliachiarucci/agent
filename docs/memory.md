@@ -34,7 +34,7 @@ The system is multi-tenant: users own **agents**, and each agent has its own iso
 ```
 
 - **Read path:** before each model call, the recent turns plus the new message are embedded and the top-scoring memories (above a relevance floor) are prepended to the user message as a `<relevant-memories>` block, while every pinned memory sits in the system prompt. The model can also search explicitly mid-conversation with the `recallMemories` tool.
-- **Write path:** the model decides what to store. When the user shares a lasting fact, the model calls `remember`; when a fact changes or was wrong, it calls `updateMemory` or `forget` using the memory ids shown in its context.
+- **Write path:** the model decides what to store. When the user shares a lasting fact, the model calls `remember`; when a fact changes or was wrong, it calls `updateMemory` or `forget` using the memory ids shown in its context. A server-side duplicate guard backs this up: `remember` refuses content that embeds too close to an already-stored memory and returns the existing ids instead (see Agent tools).
 
 ### Why retrieved memories go in the user message, not the system prompt
 
@@ -84,9 +84,15 @@ score = 0.6 × relevance + 0.2 × recency + 0.2 × importance (+ 0.1 × subject-
 
 Weights and half-life are constants at the top of the file (`WEIGHTS`, `RECENCY_HALF_LIFE_SECONDS`) — tune them there. Pinned memories are excluded from search results since they are always in the prompt anyway.
 
-Search accepts an optional `minRelevance` floor applied to the cosine-similarity component alone (before blending), so recency/importance can't surface memories unrelated to the query. Auto-injection uses it (`AUTO_RECALL_MIN_RELEVANCE = 0.62`, limit 4 in [lib/agent/memory.ts](../lib/agent/memory.ts)); the `recallMemories` tool does not, since an explicit search should return its best matches regardless.
+Search accepts an optional `minRelevance` floor applied to the cosine-similarity component alone (before blending), so recency/importance can't surface memories unrelated to the query. Auto-injection uses it (`AUTO_RECALL_MIN_RELEVANCE = 0.48`, limit 4 in [lib/agent/memory.ts](../lib/agent/memory.ts)); the `recallMemories` tool does not, since an explicit search should return its best matches regardless.
 
-The floor is a junk guard, not a precision filter, and it is calibrated for the current embedding regime: EmbeddingGemma's task prefixes (search text embedded as a *query*, memories as *documents* — applied inside `embedText`, call sites just declare the side) plus speaker-prefixed query text (`"Elia: …"`) against third-person memories. Measured bands: unrelated queries ~0.35–0.45, direct hits ~0.53–0.69; `0.49` splits them with margin. Relative *ranking* is reliable (the right memory consistently sorts first); absolute scores are not. `test/ai/rag.test.ts` guards the calibration. If the model, dtype, or phrasing changes, re-measure with `npm run calibrate` (no database needed), update the constant, and **re-embed every stored memory** with `npm run reembed` — old and new vectors are not comparable.
+The floor is a junk guard, not a precision filter, and it is calibrated for the current embedding regime: EmbeddingGemma's task prefixes (search text embedded as a *query*, memories as *documents* — applied inside `embedText`, call sites just declare the side) plus speaker-prefixed query text (`"Elia: …"`) against third-person memories. Measured bands: unrelated queries ~0.35–0.45, direct hits ~0.53–0.69; `0.48` splits them with margin. Relative *ranking* is reliable (the right memory consistently sorts first); absolute scores are not. `test/ai/rag.test.ts` guards the calibration. If the model, dtype, or phrasing changes, re-measure with `npm run calibrate` (no database needed), update the constant, and **re-embed every stored memory** with `npm run reembed` — old and new vectors are not comparable.
+
+## Duplicate guard
+
+`remember` checks every candidate fact against the agent's pool before writing: the content is embedded once, `findSimilarMemories` ([lib/db/memories.ts](../lib/db/memories.ts)) runs a plain cosine search with it (no recency/importance blending, no `last_accessed_at` touch, pinned included), and if anything scores at or above `DUPLICATE_MIN_SIMILARITY` (`0.80`, [lib/agent/memory.ts](../lib/agent/memory.ts)) the insert is skipped. The tool result carries the similar memories' ids and contents plus instructions: update the existing memory if the fact changed, do nothing if it is already stored, or re-call `remember` with `allowDuplicate: true` if it is genuinely distinct. On a clean store the precomputed embedding is reused for the insert, so the check costs one extra SELECT, not a second embed.
+
+This threshold lives in a different regime from the retrieval floor: both sides embed as kind *document*, which yields much higher cosines than query-vs-document. Measured bands (`npm run calibrate`): paraphrases and changed-value contradictions of the same fact ~0.84–0.98, distinct facts — including same-shaped facts about another member ("Elia's car…" vs "Anna's car…" ≈ 0.54) — ~0.54–0.75. `0.80` splits them with margin; `test/ai/rag.test.ts` guards both bands. Recalibrate alongside the retrieval floor whenever the embedding model, dtype, or memory phrasing changes.
 
 ## Agent tools
 
@@ -94,7 +100,7 @@ Built per request by `buildMemoryTools(scope)` in [lib/agent/memory.ts](../lib/a
 
 | Tool             | What it does                                                                  |
 | ---------------- | ----------------------------------------------------------------------------- |
-| `remember`       | Store a new fact (third-person content, subject, importance, category, optional pinned). The `subject` field is an enum of member names plus `"shared"`, mapped to `subject_user_id` server-side. |
+| `remember`       | Store a new fact (third-person content, subject, importance, category, optional pinned). The `subject` field is an enum of member names plus `"shared"`, mapped to `subject_user_id` server-side. Near-duplicates are refused: if the content's embedding lands within `DUPLICATE_MIN_SIMILARITY` of a stored memory (pinned included), nothing is written and the tool returns the similar memories' ids + contents so the model can `updateMemory` instead — or retry with `allowDuplicate: true` when the fact is genuinely distinct. |
 | `updateMemory`   | Modify an existing memory by id; re-embeds automatically if content changes.  |
 | `forget`         | Permanently delete a memory by id.                                            |
 | `recallMemories` | Semantic search (optionally filtered by category), returns ids + content; results are subject-boosted for the current speaker. |
