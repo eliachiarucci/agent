@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { SERVER_PORTS, serverUrl, testFilesDir } from "../config";
 import { TestClient } from "../helpers/client";
 import { signUp, type TestUser } from "../helpers/auth";
 import { closeDb, resetDb } from "../helpers/db";
 import { createMessage } from "../../lib/db/conversations";
-import { writeConversationFile } from "../../lib/agent/files";
+import { readConversationFile, writeConversationFile } from "../../lib/agent/files";
 
 const BASE = serverUrl("api");
 
@@ -17,8 +18,8 @@ afterAll(closeDb);
 
 // Owner + member sharing the owner's default agent, same as sharing.test.ts.
 // Conversations are seeded directly in the database (POST /agent/conversation
-// would invoke the chat model) and their files directly on disk (only agent
-// tools create files; there is no upload API).
+// would invoke the chat model) and their files directly on disk; the upload API
+// (POST /agent/files) is exercised in its own describe block below.
 async function scenario() {
   const owner = new TestClient(BASE);
   const member = new TestClient(BASE);
@@ -79,6 +80,61 @@ describe("GET /agent/files", () => {
     const outsider = new TestClient(BASE);
     await signUp(outsider, "Outsider");
     expect((await outsider.get(`/agent/files?agent_id=${agentId}`)).status).toBe(403);
+  });
+});
+
+describe("POST /agent/files", () => {
+  const upload = (
+    client: TestClient,
+    conversationId: string,
+    name: string,
+    content: string
+  ) =>
+    client.request(
+      `/agent/files?conversation_id=${conversationId}&name=${encodeURIComponent(name)}`,
+      { method: "POST", headers: { "content-type": "text/plain" }, body: content }
+    );
+
+  it("stores an attachment for a brand-new conversation and an existing accessible one", async () => {
+    const { owner, ownerUser, agentId } = await scenario();
+
+    // No row yet: the client generated the id and the message that follows
+    // creates it — an authenticated user may seed its folder.
+    const newId = randomUUID();
+    const newRes = await upload(owner, newId, "pasted-content-1.txt", "hello");
+    expect(newRes.status).toBe(201);
+    expect(await newRes.json()).toMatchObject({
+      conversationId: newId,
+      name: "pasted-content-1.txt",
+      size: 5,
+    });
+    expect(await readConversationFile(newId, "pasted-content-1.txt")).toBe("hello");
+
+    const conv = await createMessage({ agentId, userId: ownerUser.id, shared: false, messages: [] });
+    const existRes = await upload(owner, conv.id, "note.txt", "world");
+    expect(existRes.status).toBe(201);
+    expect(await readConversationFile(conv.id, "note.txt")).toBe("world");
+  });
+
+  it("enforces auth and conversation access, and validates the request", async () => {
+    const { owner, member, ownerUser, agentId } = await scenario();
+    const ownerPrivate = await createMessage({
+      agentId,
+      userId: ownerUser.id,
+      shared: false,
+      messages: [],
+    });
+
+    // A member of the agent still can't write to someone else's private chat.
+    expect((await upload(member, ownerPrivate.id, "x.txt", "x")).status).toBe(403);
+
+    // Anonymous is rejected even for a not-yet-created conversation.
+    const anonymous = new TestClient(BASE);
+    expect((await upload(anonymous, randomUUID(), "x.txt", "x")).status).toBe(401);
+
+    // Traversal names and empty bodies are 400.
+    expect((await upload(owner, ownerPrivate.id, "../escape.txt", "x")).status).toBe(400);
+    expect((await upload(owner, ownerPrivate.id, "ok.txt", "")).status).toBe(400);
   });
 });
 

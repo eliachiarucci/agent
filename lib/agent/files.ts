@@ -12,6 +12,10 @@ const filesRoot = () => resolve(process.env.FILES_DIR ?? "data/files");
 
 // Bounds chosen for text artifacts written by a model, not user uploads.
 const MAX_FILE_BYTES = 1024 * 1024;
+// User uploads (pasted-content attachments today; documents and images next) get
+// a larger ceiling than the model-written artifacts above, which are kept small
+// for local-model context budgets.
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const MAX_FILES_PER_CONVERSATION = 100;
 // Keeps readFile tool results within local-model-friendly context budgets.
 const MAX_READ_CHARS = 20_000;
@@ -93,15 +97,19 @@ export async function readConversationFile(
   }
 }
 
-export async function writeConversationFile(
+// Binary-safe core write, shared by the model's writeFile tool (UTF-8 text) and
+// the upload endpoint (raw bytes). Enforces the size ceiling and the
+// per-conversation file cap, then writes the bytes verbatim.
+export async function writeConversationFileBytes(
   conversationId: string,
   name: string,
-  content: string
+  data: Buffer,
+  maxBytes: number = MAX_FILE_BYTES
 ): Promise<ConversationFile> {
   const path = conversationFilePath(conversationId, name);
-  const size = Buffer.byteLength(content, "utf8");
-  if (size > MAX_FILE_BYTES) {
-    throw new Error(`File too large (${size} bytes); the limit is ${MAX_FILE_BYTES} bytes`);
+  const size = data.byteLength;
+  if (size > maxBytes) {
+    throw new Error(`File too large (${size} bytes); the limit is ${maxBytes} bytes`);
   }
   const existing = await listConversationFiles(conversationId);
   if (
@@ -113,8 +121,16 @@ export async function writeConversationFile(
     );
   }
   await mkdir(join(filesRoot(), conversationId), { recursive: true });
-  await writeFile(path, content, "utf8");
+  await writeFile(path, data);
   return { name, size, updatedAt: new Date() };
+}
+
+export function writeConversationFile(
+  conversationId: string,
+  name: string,
+  content: string
+): Promise<ConversationFile> {
+  return writeConversationFileBytes(conversationId, name, Buffer.from(content, "utf8"));
 }
 
 /** Replaces every occurrence of `oldText`; throws when the file or the text is missing. */
@@ -244,6 +260,11 @@ export function buildFileTools(conversationId: string) {
   };
 }
 
+// Marker prefix for the user-message text part that lists files the user
+// attached to a turn (e.g. long pasted content). The UI's matching constant
+// lives in agent-ui/src/lib/api.ts — keep the two literals in sync.
+export const ATTACHED_FILES_MARKER = "<attached-files>";
+
 // Static text: like the rest of the system prompt it must stay byte-identical
 // across turns of a conversation (KV-cache reuse, see docs/memory.md).
 export const filesPrompt = [
@@ -251,5 +272,6 @@ export const filesPrompt = [
   "- This conversation has its own private file workspace: create or replace files with writeFile, make targeted changes with editFile, and inspect what exists with listFiles and readFile.",
   "- Save deliverables the user will want to keep or download (documents, code, plans, lists) as files instead of only pasting them into chat, and mention the file name — the user can download files from the Files view.",
   "- After writing or updating a file worth looking at, call presentFile to open it in the viewer next to the chat (markdown is rendered, HTML is displayed as a page). Don't paste the file's content into the chat as well.",
+  "- Files the user attaches to a message are listed in an `<attached-files>` block (a JSON array of {name, label}); they are saved in this workspace already — read their content with readFile by name when it is relevant to the request.",
   "- Files persist across turns of this conversation but are not visible from other conversations.",
 ].join("\n");

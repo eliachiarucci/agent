@@ -30,7 +30,13 @@ import {
 } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
 import { buildCronTools, buildCronToolsPrompt } from "../../lib/agent/cron-tools";
-import { buildFileTools, filesPrompt, removeConversationFiles } from "../../lib/agent/files";
+import {
+    ATTACHED_FILES_MARKER,
+    buildFileTools,
+    filesPrompt,
+    isValidFileName,
+    removeConversationFiles,
+} from "../../lib/agent/files";
 import { buildNoteTools, notesPrompt } from "../../lib/agent/notes";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
@@ -43,13 +49,21 @@ function toUIMessages(stored: StoredMessage[]): UIMessage[] {
     );
 }
 
+// Machine-inserted text parts on a user message — the retrieved memories block
+// and the attached-files list — are model context, not something the user typed.
+// Anywhere we treat a text part as user words (retrieval, speaker labels) we
+// must skip these so their markup never feeds retrieval or gets a name prefix.
+function isMachineTextPart(text: string): boolean {
+    return text.startsWith("<relevant-memories>") || text.startsWith(ATTACHED_FILES_MARKER);
+}
+
 // Recent turns plus the new message, so follow-ups like "what about her birthday?"
 // embed with enough context to retrieve anything. Injected <relevant-memories>
 // blocks are excluded to avoid retrieval feeding on its own previous output.
 function buildRetrievalQuery(history: UIMessage[], message: string): string {
     const recent = history.slice(-4).flatMap((m) =>
         m.parts.flatMap((p) =>
-            p.type === "text" && !p.text.startsWith("<relevant-memories>") ? [p.text] : []
+            p.type === "text" && !isMachineTextPart(p.text) ? [p.text] : []
         )
     );
     return [...recent, message].join("\n").slice(-2000);
@@ -70,7 +84,7 @@ function withSpeakerLabels(history: UIMessage[]): UIMessage[] {
         return {
             ...m,
             parts: m.parts.map((p) =>
-                p.type === "text" && !p.text.startsWith("<relevant-memories>")
+                p.type === "text" && !isMachineTextPart(p.text)
                     ? { ...p, text: `${name}: ${p.text}` }
                     : p
             ),
@@ -85,21 +99,36 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
     res.sendStatus(204);
 }
 
-// The user comes from the session cookie; agent_id defaults to their oldest agent.
-const bodySchema = z.object({
-    message: z.string().min(1),
-    conversation_id: z.uuid().optional(),
-    agent_id: z.uuid().optional(),
-    // Only honored when the conversation is created; existing ones keep their flag.
-    shared: z.boolean().optional(),
-    // The model selected in the UI. Resolved against the *sender's* provider
-    // settings; omitted → the env-configured default model.
-    provider: z.enum(PROVIDER_TYPES).optional(),
-    model: z.string().min(1).optional(),
-    // The sender's IANA timezone; scheduling tools interpret times in it.
-    // Omitted → the server's timezone.
-    timezone: z.string().min(1).optional(),
+// Files the user attached to this turn, already uploaded to the conversation's
+// workspace (POST /agent/files). `name` is the stored file name the agent reads
+// with readFile; `label` is the chip text the UI shows on the message.
+const attachmentSchema = z.object({
+    name: z.string().refine(isValidFileName, "Invalid file name"),
+    label: z.string().min(1).max(200),
 });
+
+// The user comes from the session cookie; agent_id defaults to their oldest agent.
+// A turn must carry text or at least one attachment (message may be empty when
+// the user only attaches files).
+const bodySchema = z
+    .object({
+        message: z.string().default(""),
+        conversation_id: z.uuid().optional(),
+        agent_id: z.uuid().optional(),
+        // Only honored when the conversation is created; existing ones keep their flag.
+        shared: z.boolean().optional(),
+        attachments: z.array(attachmentSchema).max(20).optional(),
+        // The model selected in the UI. Resolved against the *sender's* provider
+        // settings; omitted → the env-configured default model.
+        provider: z.enum(PROVIDER_TYPES).optional(),
+        model: z.string().min(1).optional(),
+        // The sender's IANA timezone; scheduling tools interpret times in it.
+        // Omitted → the server's timezone.
+        timezone: z.string().min(1).optional(),
+    })
+    .refine((d) => d.message.trim().length > 0 || (d.attachments?.length ?? 0) > 0, {
+        message: "message or attachments required",
+    });
 
 export const POST: express.RequestHandler = async (req, res) => {
     const parsed = bodySchema.safeParse(req.body);
@@ -108,7 +137,8 @@ export const POST: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { message, conversation_id, agent_id, shared, provider, model, timezone } = parsed.data;
+    const { message, conversation_id, agent_id, shared, attachments, provider, model, timezone } =
+        parsed.data;
 
     const user = await getSessionUser(req);
     if (!user) {
@@ -181,13 +211,22 @@ export const POST: express.RequestHandler = async (req, res) => {
         buildMemorySystemPrompt(scope, { sharedConversation: conversationShared }),
     ]);
 
+    // Attached files ride along as a machine text part (parsed by the UI into
+    // chips, read by the model via readFile) — stored so reloads and later turns
+    // see the same attachments. The literal must match the UI's ATTACHMENTS_MARKER.
+    const attachmentsBlock =
+        attachments && attachments.length > 0
+            ? ATTACHED_FILES_MARKER + JSON.stringify(attachments)
+            : "";
+
     history.push({
         id: crypto.randomUUID(),
         role: "user",
         metadata: { userId: user.id, userName: user.name } satisfies UserMessageMetadata,
         parts: [
             ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
-            { type: "text", text: message },
+            ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
+            ...(attachmentsBlock ? [{ type: "text" as const, text: attachmentsBlock }] : []),
         ],
     });
 
