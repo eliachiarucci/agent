@@ -154,6 +154,8 @@ The update sequence:
    the new app container.
 4. Only after the new images are running are the versions recorded in config — a failed
    update stays retryable.
+5. Once the stack is healthy, the previous backend/UI image tags are removed
+   (best-effort) so updates don't accumulate old images on disk.
 
 ## Releasing (maintainers)
 
