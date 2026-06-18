@@ -3,7 +3,7 @@ import { serverUrl } from "../config";
 import { TestClient } from "../helpers/client";
 import { signUp } from "../helpers/auth";
 import { closeDb, resetDb } from "../helpers/db";
-import { createCronJobRun, getCronJob } from "../../lib/db/cron";
+import { createCronJobRun, findDueCronJobs, getCronJob } from "../../lib/db/cron";
 import { removeAgentMember } from "../../lib/db/agents";
 
 const BASE = serverUrl("api");
@@ -149,6 +149,26 @@ describe("PATCH /agent/jobs", () => {
     const nextRunAt = new Date(rescheduled.body.nextRunAt);
     expect(nextRunAt.getTime()).toBeGreaterThan(Date.now());
     expect(nextRunAt.getUTCDay()).toBe(2);
+  });
+
+  it("pauses and resumes a job; the scheduler skips it while paused", async () => {
+    const alice = await userWithAgent("Alice");
+    const { body: job } = await alice.client.post("/agent/jobs", validJob(alice.agentId));
+    expect(job.paused).toBe(false);
+
+    const paused = await alice.client.patch("/agent/jobs", { id: job.id, paused: true });
+    expect(paused.status).toBe(200);
+    expect(paused.body.paused).toBe(true);
+    // Even well past its nextRunAt, a paused job is invisible to the scheduler.
+    const dueWhilePaused = await findDueCronJobs(new Date(Date.now() + 8 * 24 * 3600_000));
+    expect(dueWhilePaused.some((j) => j.id === job.id)).toBe(false);
+
+    const resumed = await alice.client.patch("/agent/jobs", { id: job.id, paused: false });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.paused).toBe(false);
+    // Resuming pushes nextRunAt back into the future — no backlog run fires.
+    expect(new Date(resumed.body.nextRunAt).getTime()).toBeGreaterThan(Date.now());
+    expect((await findDueCronJobs(new Date())).some((j) => j.id === job.id)).toBe(false);
   });
 
   it("only the creator can update", async () => {

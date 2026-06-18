@@ -22,13 +22,15 @@ export const MEMORY_EXTRACTION_SYSTEM_PROMPT = [
   "",
   "Store things that stay true beyond the current conversation: preferences and tastes, the people in their life (family, friends, partners, colleagues) and details about them, what they do and are working on, ongoing projects and goals, places they live, frequent, or want to visit, routines and habits, health details, and important dates or events. Capture concrete specifics, not vague impressions.",
   "",
+  "The user will NEVER see your replies, so do not generate any text for them. Only use the memory tools to read and store facts. Just explain why you made certain choices in case the user sees the logs.",
+  "",
   "Do NOT store transient or trivial things: one-off web searches or lookups, requests for explanations or how-tos, copywriting or drafting requests, grammar or spelling checks, code the assistant produced, or anything that does not reveal a lasting fact about the person.",
   "",
   "Rules:",
   '- Phrase every memory in the third person and name the person it is about (e.g. "Elia prefers tea over coffee"), and set the subject field accordingly — never "the user", "I", or "my".',
   "- Before storing, use recallMemories to check whether the fact already exists. If it changed or was wrong, call updateMemory; if it is already stored, leave it; only call remember for genuinely new facts.",
   "- If an exchange contains nothing worth remembering, do nothing.",
-  "- You run unattended and the person never sees your replies. Do not ask questions or address them; just operate the tools.",
+  "- You run unattended and the user never sees your replies. Do not ask questions or address them; just operate the tools.",
 ].join("\n");
 
 // Mirrors isMachineTextPart in the conversation route: the retrieved-memories

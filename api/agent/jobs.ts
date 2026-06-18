@@ -160,6 +160,8 @@ const updateSchema = z.object({
         .optional(),
     recurrence: z.enum(CRON_RECURRENCES).optional(),
     timezone: z.string().min(1).optional(),
+    // Pause/resume: paused jobs stay in the list but the scheduler skips them.
+    paused: z.boolean().optional(),
     // null clears both back to the env default model.
     provider: z.enum(PROVIDER_TYPES).nullable().optional(),
     model: z.string().min(1).nullable().optional(),
@@ -188,7 +190,7 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { title, prompt, days_of_week, time, recurrence, timezone, provider, model } =
+    const { title, prompt, days_of_week, time, recurrence, timezone, paused, provider, model } =
         parsed.data;
 
     if (provider) {
@@ -203,12 +205,15 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         }
     }
 
-    // Any schedule field change reschedules the job from now.
+    // Any schedule field change reschedules the job from now. Resuming a paused
+    // job does too, so a slot missed during the pause doesn't fire a backlog run
+    // on the next tick — it picks up from its next future occurrence instead.
     const rescheduled =
         days_of_week !== undefined ||
         time !== undefined ||
         recurrence !== undefined ||
         timezone !== undefined;
+    const resumed = paused === false && job.paused;
     const schedule = {
         daysOfWeek: days_of_week ? [...new Set(days_of_week)].sort((a, b) => a - b) : job.daysOfWeek,
         time: time ?? job.time,
@@ -216,7 +221,7 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         timezone: timezone ?? job.timezone,
     };
     let nextRunAt: Date | undefined;
-    if (rescheduled) {
+    if (rescheduled || resumed) {
         try {
             nextRunAt = nextOccurrence(schedule, new Date());
         } catch {
@@ -228,7 +233,8 @@ export const PATCH: express.RequestHandler = async (req, res) => {
     const updated = await updateCronJob(job.id, {
         ...(title !== undefined && { title: title?.trim() || null }),
         ...(prompt !== undefined && { prompt }),
-        ...(rescheduled && {
+        ...(paused !== undefined && { paused }),
+        ...((rescheduled || resumed) && {
             daysOfWeek: schedule.daysOfWeek,
             time: schedule.time,
             recurrence: schedule.recurrence,

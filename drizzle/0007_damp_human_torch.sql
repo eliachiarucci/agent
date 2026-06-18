@@ -1,0 +1,1 @@
+ALTER TABLE "cron_jobs" ADD COLUMN "paused" boolean DEFAULT false NOT NULL;

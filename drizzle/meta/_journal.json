@@ -50,6 +50,13 @@
       "when": 1781807221169,
       "tag": "0006_foamy_trish_tilby",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781808688415,
+      "tag": "0007_damp_human_torch",
+      "breakpoints": true
     }
   ]
 }

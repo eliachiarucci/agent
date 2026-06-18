@@ -54,6 +54,7 @@ function describeJob(job: CronJob) {
     days: job.daysOfWeek.map((d) => DAY_NAMES[d]),
     time: job.time,
     timezone: job.timezone,
+    paused: job.paused,
     next_run: job.nextRunAt.toISOString(),
   };
 }

@@ -105,6 +105,7 @@ The chat model writing its own memories mid-conversation is best-effort — it c
 - **System prompt** (`MEMORY_EXTRACTION_SYSTEM_PROMPT`): store durable, personal facts (preferences, people, work, places, routines, health, dates); ignore transient/trivial things (one-off lookups, how-tos, copywriting, grammar checks, generated code); phrase third-person with names; `recallMemories` before storing; do nothing when there is nothing to remember.
 - **Model:** the agent's configured memory model (`agents.memory_provider` / `memory_model`), owner-picked in **Settings → Agent → Memory model**. It is resolved against the **owner's** provider credentials exactly like a chat request (`resolveMemoryModel`, mirroring cron's `resolveJobModel`), and falls back to the env-configured `CHAT_MODEL` when unset or when that provider has since been deconfigured. Independent of whatever provider/model the turn itself used.
 - **Tools:** only `buildMemoryTools(scope)` — the same `remember`/`updateMemory`/`forget`/`recallMemories` the chat model gets, scoped to the same agent pool and attributing `created_by` to the turn's sender.
+- **Inspecting them:** read-only via `GET /agent/memory-conversations` (list) and `?id=` (one, with messages flattened to text + tool calls/results). Access mirrors the source conversation — a private chat's memory conversation stays private. Surfaced in the UI behind the Memories dialog's "View memory conversations" (list → conversation, same in-dialog navigation as recurring jobs).
 
 ## Agent tools
 

@@ -12,8 +12,9 @@ One-time jobs double as reminders.
   job's model on the next run and saves it), `prompt`, `days_of_week` (int[],
   0 = Sunday … 6 = Saturday), `time` ("HH:MM"), `recurrence`
   (`once | weekly | biweekly | monthly`), `timezone` (IANA name captured from
-  the creator's browser), optional `provider`/`model`, and `next_run_at` — the
-  precomputed absolute instant the scheduler polls on.
+  the creator's browser), optional `provider`/`model`, `paused` (bool, default
+  `false` — paused jobs stay in the list but the scheduler skips them), and
+  `next_run_at` — the precomputed absolute instant the scheduler polls on.
 - `cron_job_runs` — run history. Rows are **self-contained** (own `user_id`,
   `agent_id`, `title`, `prompt` copies; `job_id` is `set null` on job deletion)
   because `once` jobs delete themselves after succeeding and the record that
@@ -38,10 +39,10 @@ done with `Intl` (DST-aware, no date library).
 ## Scheduler (`lib/agent/cron.ts`)
 
 `startCronScheduler()` (wired in `index.ts`, `CRON=off` disables) ticks every
-60s: it loads jobs with `next_run_at <= now`, advances `next_run_at` with a
-compare-and-swap (`claimCronJob`) so overlapping ticks or a second server never
-double-run a job, then runs each claimed job. A job missed during downtime runs
-once and skips ahead — no catch-up backlog.
+60s: it loads jobs with `next_run_at <= now` **and `paused = false`**, advances
+`next_run_at` with a compare-and-swap (`claimCronJob`) so overlapping ticks or a
+second server never double-run a job, then runs each claimed job. A job missed
+during downtime runs once and skips ahead — no catch-up backlog.
 
 Runs mirror the chat route's prompt assembly (base prompt + agent prompt +
 memory + search/files/notes tools) but use non-streaming `generateText`. The
@@ -59,7 +60,9 @@ the chat route), then updated with the assistant's reply.
   request).
 - `PATCH /agent/jobs` — partial update, creator only. Any schedule field
   reschedules from now; `title: null` clears the title (regenerated on the
-  next run); `provider: null` returns the job to the env default model.
+  next run); `provider: null` returns the job to the env default model;
+  `paused: true|false` pauses/resumes the job (resuming recomputes
+  `next_run_at` from now so a slot missed during the pause doesn't fire).
 - `DELETE /agent/jobs?id=` — creator only.
 - `GET /agent/jobs/runs` — run history (self-contained rows + agent name).
 - `POST /agent/jobs/trigger` — manual run, creator only. Returns 202 and runs
@@ -79,7 +82,8 @@ system prompt and is stable per session (KV-cache friendly).
 ## UI (`agent-ui`)
 
 Sidebar → **Recurring Jobs** opens a dialog: run history + scheduled jobs
-(trigger-now and delete per job), and a create form (multi-select day chips,
+(each shows an active/paused status and has pause-resume, run-now, and delete
+controls), and a create form (multi-select day chips,
 time, recurrence incl. **Once**, agent, model picker mirroring the chat's
 selector, prompt). Clicking a successful run opens its conversation. After a
 manual trigger the dialog polls `GET /agent/jobs/runs` (~3s interval, up to

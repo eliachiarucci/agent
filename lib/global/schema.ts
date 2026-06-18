@@ -271,6 +271,10 @@ export const cronJobs = pgTable(
     // settings like a chat request; NULL → the env-configured default model.
     provider: text("provider").$type<ProviderType>(),
     model: text("model"),
+    // Paused jobs stay in the list but the scheduler skips them
+    // (findDueCronJobs filters them out); resuming recomputes nextRunAt so no
+    // missed slot fires a backlog run. Manual triggers ignore this flag.
+    paused: boolean("paused").notNull().default(false),
     // IANA name (e.g. "Europe/Rome") captured from the creator's browser.
     timezone: text("timezone").notNull(),
     nextRunAt: timestamp("next_run_at").notNull(),

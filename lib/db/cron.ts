@@ -30,6 +30,7 @@ export async function updateCronJob(
       | "nextRunAt"
       | "provider"
       | "model"
+      | "paused"
     >
   >
 ): Promise<CronJob | undefined> {
@@ -55,8 +56,12 @@ export async function listCronJobsForUser(
   return rows.map((r) => ({ ...r.job, agentName: r.agentName }));
 }
 
+// Paused jobs are skipped here so the scheduler never claims or runs them;
+// resuming (api/agent/jobs.ts) recomputes nextRunAt back into the future.
 export async function findDueCronJobs(now: Date): Promise<CronJob[]> {
-  return db.query.cronJobs.findMany({ where: lte(cronJobs.nextRunAt, now) });
+  return db.query.cronJobs.findMany({
+    where: and(lte(cronJobs.nextRunAt, now), eq(cronJobs.paused, false)),
+  });
 }
 
 /**
