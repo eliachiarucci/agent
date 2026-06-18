@@ -16,6 +16,7 @@ const main = async () => {
     // Containerized deployments set MIGRATE=on (committed migrations in
     // drizzle/). Dev and test DBs are managed with `drizzle-kit push` instead,
     // where migrate() would fail on already-existing tables — never set it there.
+    // TODO: Keep as example but remove as the app is not released yet and I'm the only user.
     if (process.env.MIGRATE === 'on') {
         await migrate(db, { migrationsFolder: 'drizzle' });
         console.log('Database migrations are up to date');
