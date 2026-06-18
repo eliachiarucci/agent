@@ -1,5 +1,6 @@
 import {
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -12,12 +13,28 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { ModelMessage, UIMessage } from "ai";
+
+// Postgres full-text-search vector. Drizzle has no native tsvector type, so we
+// declare a minimal one; it is only ever populated as a generated column, never
+// written directly.
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 // Rows written before the UI message stream migration; still readable.
 export type LegacyMessage = { role: "user" | "assistant"; content: string };
 export type StoredMessage = UIMessage | LegacyMessage;
+
+// Auto-compaction pointer for a conversation (lib/agent/compaction.ts). The full
+// message history is always kept; this records a summary of everything up to
+// (and including) `throughMessageId`, so the model is fed [summary, ...messages
+// after it] instead of the whole transcript. `tokens` is the usage observed when
+// the summary was made (telemetry / re-trigger context). NULL = not yet compacted.
+export type CompactionState = { summary: string; throughMessageId: string; tokens: number };
 
 // UUIDv4 (not v7): user ids may end up in URLs/tokens and shouldn't leak creation order.
 // Doubles as Better Auth's `user` model (mapped in lib/global/auth.ts); the
@@ -165,10 +182,27 @@ export const conversations = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     shared: boolean("shared").notNull().default(false),
     messages: jsonb("messages").notNull().$type<StoredMessage[]>(),
+    // Plaintext of the conversation's user/assistant messages (machine-inserted
+    // blocks like <relevant-memories> stripped), maintained on every write by the
+    // db layer (messageSearchText). Backs the searchChats full-text tool. NULL on
+    // rows written before this column existed; deploys fill those at startup
+    // (backfillSearchText in index.ts), or run `npm run backfill:search`.
+    searchText: text("search_text"),
+    // Generated FTS vector over searchText, GIN-indexed. STORED and derived, so it
+    // can never drift from the messages — no separate sync pipeline to maintain.
+    searchVector: tsvector("search_vector").generatedAlwaysAs(
+      (): SQL => sql`to_tsvector('english', coalesce(search_text, ''))`
+    ),
+    // Auto-compaction pointer (NULL until the conversation first crosses the
+    // context threshold); see CompactionState above and lib/agent/compaction.ts.
+    compaction: jsonb("compaction").$type<CompactionState>(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
-  (t) => [index("conversations_agent_idx").on(t.agentId)]
+  (t) => [
+    index("conversations_agent_idx").on(t.agentId),
+    index("conversations_search_idx").using("gin", t.searchVector),
+  ]
 );
 
 // One row per source conversation: the running message history of the

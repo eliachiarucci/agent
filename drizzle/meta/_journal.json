@@ -57,6 +57,20 @@
       "when": 1781808688415,
       "tag": "0007_damp_human_torch",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781812535078,
+      "tag": "0008_loose_stardust",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781819698207,
+      "tag": "0009_lush_human_fly",
+      "breakpoints": true
     }
   ]
 }

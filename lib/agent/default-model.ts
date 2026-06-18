@@ -29,3 +29,14 @@ export async function resolveDefaultChatModel(userId: string) {
     ? chatModelFromSettings(target.provider, target.settings, target.model)
     : defaultChatModel();
 }
+
+// Both the model and the target that produced it. The target (null for the env
+// default) is what context-window lookups and auto-compaction need; building it
+// alongside the model avoids resolving the user's settings twice.
+export async function resolveDefaultChatModelAndTarget(userId: string) {
+  const target = await resolveDefaultModelTarget(userId);
+  const model = target
+    ? chatModelFromSettings(target.provider, target.settings, target.model)
+    : defaultChatModel();
+  return { model, target };
+}

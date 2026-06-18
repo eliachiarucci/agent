@@ -7,6 +7,7 @@ import { preloadEmbedder } from './lib/global/ai';
 import { startCronScheduler } from './lib/agent/cron';
 import { auth } from './lib/global/auth';
 import { db } from './lib/global/db';
+import { backfillSearchText } from './lib/db/conversations';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 type HttpMethod = typeof HTTP_METHODS[number];
@@ -18,6 +19,11 @@ const main = async () => {
     if (process.env.MIGRATE === 'on') {
         await migrate(db, { migrationsFolder: 'drizzle' });
         console.log('Database migrations are up to date');
+        // Fill search_text for conversations created before the column existed, so
+        // the searchChats tool can see old history. Scoped to rows missing it, so
+        // after the first deploy this is a cheap no-op on every restart.
+        const filled = await backfillSearchText();
+        if (filled > 0) console.log(`Backfilled conversation search text for ${filled} conversations`);
     }
 
     const app = express();

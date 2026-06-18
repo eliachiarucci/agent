@@ -10,6 +10,10 @@ cd ~/personal/agent-cli
 #    "backend": "v0.2.0"   (or "ui": …)
 git commit -am "chore: backend v0.2.0" && git push
 
+# Note: `agent update` reads versions.json from raw.githubusercontent.com, which
+# caches with max-age=300. For up to ~5 min after the push, `agent update` still
+# reports "Already up to date" — that's the CDN, not a failed rollout. Wait and retry.
+
 -----
 
 ### CLI release (only when CLI code itself changed):

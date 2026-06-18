@@ -2,7 +2,9 @@ import express from 'express';
 import {
     consumeStream,
     convertToModelMessages,
+    createUIMessageStream,
     extractReasoningMiddleware,
+    pipeUIMessageStreamToResponse,
     stepCountIs,
     streamText,
     wrapLanguageModel,
@@ -10,7 +12,13 @@ import {
 } from "ai";
 import { z } from "zod";
 import { chatModelFromSettings } from "../../lib/global/ai";
-import { resolveDefaultChatModel } from "../../lib/agent/default-model";
+import { resolveDefaultChatModelAndTarget } from "../../lib/agent/default-model";
+import {
+    applyCompaction,
+    CONVERSATION_SUMMARY_OPEN,
+    planChatCompaction,
+    usageTokens,
+} from "../../lib/agent/compaction";
 import { PROVIDER_TYPES } from "../../lib/global/providers";
 import { getProviderSetting } from "../../lib/db/provider-settings";
 import {
@@ -39,6 +47,10 @@ import {
     removeConversationFiles,
 } from "../../lib/agent/files";
 import { buildNoteTools, notesPrompt } from "../../lib/agent/notes";
+import {
+    buildConversationSearchTools,
+    conversationSearchPrompt,
+} from "../../lib/agent/conversation-search";
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
@@ -56,7 +68,11 @@ function toUIMessages(stored: StoredMessage[]): UIMessage[] {
 // Anywhere we treat a text part as user words (retrieval, speaker labels) we
 // must skip these so their markup never feeds retrieval or gets a name prefix.
 function isMachineTextPart(text: string): boolean {
-    return text.startsWith("<relevant-memories>") || text.startsWith(ATTACHED_FILES_MARKER);
+    return (
+        text.startsWith("<relevant-memories>") ||
+        text.startsWith(ATTACHED_FILES_MARKER) ||
+        text.startsWith(CONVERSATION_SUMMARY_OPEN)
+    );
 }
 
 // Recent turns plus the new message, so follow-ups like "what about her birthday?"
@@ -149,8 +165,12 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     // Resolve the model before any rows are written, so a bad selection is a
-    // clean 4xx. No selection → the user's configured default (else env).
-    let chatModel = await resolveDefaultChatModel(user.id);
+    // clean 4xx. No selection → the user's configured default (else env). The
+    // target (null = env default) is captured for the post-turn context-window
+    // lookup that drives auto-compaction.
+    let { model: chatModel, target: contextTarget } = await resolveDefaultChatModelAndTarget(
+        user.id
+    );
     if (provider) {
         const setting = await getProviderSetting(user.id, provider);
         if (!setting) {
@@ -163,6 +183,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             return;
         }
         chatModel = chatModelFromSettings(provider, setting.settings, modelId);
+        contextTarget = { provider, settings: setting.settings, model: modelId };
     }
 
     // Create-if-missing: the client generates the UUID for new conversations so it
@@ -275,6 +296,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         webSearchPrompt,
         filesPrompt,
         notesPrompt,
+        conversationSearchPrompt,
         buildCronToolsPrompt(cronScope.timezone),
     ]
         .filter(Boolean)
@@ -287,11 +309,20 @@ export const POST: express.RequestHandler = async (req, res) => {
         ...buildFileTools(conversationId),
         ...buildNoteTools(agentId, user.id),
         ...buildCronTools(cronScope),
+        ...buildConversationSearchTools({
+            agentId,
+            viewerId: user.id,
+            currentConversationId: conversationId,
+        }),
     };
 
-    // Speaker labels only matter (and only stay stable) when several people can
-    // write to the conversation; private chats keep the prompt unchanged.
-    const modelHistory = conversationShared ? withSpeakerLabels(history) : history;
+    // If the conversation was previously compacted, the model sees the stored
+    // summary plus everything after the summarized point (the full history stays
+    // persisted for scrollback). Speaker labels only matter (and only stay
+    // stable) when several people can write; private chats keep the prompt
+    // unchanged.
+    const modelView = applyCompaction(history, existing?.compaction ?? null);
+    const modelHistory = conversationShared ? withSpeakerLabels(modelView) : modelView;
     const modelMessages = await convertToModelMessages(modelHistory, {
         tools,
         ignoreIncompleteToolCalls: true,
@@ -326,29 +357,13 @@ export const POST: express.RequestHandler = async (req, res) => {
         stopWhen: stepCountIs(8),
     });
 
-    result.pipeUIMessageStreamToResponse(res, {
-        // Tees the SSE stream to an independent consumer, so the turn runs to
-        // completion (and onFinish persists it) even if the client disconnects
-        // mid-stream. result.consumeStream() is not enough: it drains the base
-        // stream, but onFinish fires from the UI-message branch, which stalls
-        // when the response socket closes.
-        consumeSseStream: consumeStream,
+    // The model turn and the auto-compaction step share one UI-message stream so
+    // compaction is visible: it runs *after* the answer but *before* the stream
+    // closes, so the client stays busy (composer blocked) and shows a
+    // "compacting" indicator from the transient data parts below.
+    const stream = createUIMessageStream<UIMessage>({
         originalMessages: history,
-        sendReasoning: true,
-        generateMessageId: () => crypto.randomUUID(),
-        // Each step's usage covers the full prompt (system + history + tools) of
-        // that request, so the last finish-step is the current context size. The
-        // UI reads it live from message metadata and it persists via onFinish.
-        messageMetadata: ({ part }) =>
-            part.type === "finish-step"
-                ? {
-                      usage: {
-                          inputTokens: part.usage.inputTokens,
-                          outputTokens: part.usage.outputTokens,
-                          totalTokens: part.usage.totalTokens,
-                      },
-                  }
-                : undefined,
+        generateId: () => crypto.randomUUID(),
         onError: (error) => (error instanceof Error ? error.message : "An error occurred."),
         onFinish: async ({ messages }) => {
             await updateMessage(conversationId, { messages });
@@ -360,6 +375,70 @@ export const POST: express.RequestHandler = async (req, res) => {
                 console.warn(`[memory] extraction failed: ${error}`)
             );
         },
+        execute: async ({ writer }) => {
+            // Stream the model's reply to the client.
+            writer.merge(
+                result.toUIMessageStream({
+                    sendReasoning: true,
+                    // Each step's usage covers the full prompt (system + history +
+                    // tools) of that request, so the last finish-step is the
+                    // current context size. The UI reads it live from message
+                    // metadata and it persists via onFinish.
+                    messageMetadata: ({ part }) =>
+                        part.type === "finish-step"
+                            ? {
+                                  usage: {
+                                      inputTokens: part.usage.inputTokens,
+                                      outputTokens: part.usage.outputTokens,
+                                      totalTokens: part.usage.totalTokens,
+                                  },
+                              }
+                            : undefined,
+                })
+            );
+
+            // Auto-compaction: if this turn pushed the model's input past the
+            // context threshold, summarize the head so the next turn loads small.
+            // Non-destructive — the full history is persisted in onFinish; only
+            // the summary pointer is written here. `await result.totalUsage` is
+            // this turn's real input size (the history above lacks it yet); a
+            // transient data part shows the user it's happening. Errors never
+            // fail the turn.
+            try {
+                const compaction = await planChatCompaction({
+                    model: chatModel,
+                    target: contextTarget ?? undefined,
+                    messages: history,
+                    prior: existing?.compaction ?? null,
+                    usedTokens: usageTokens(await result.totalUsage),
+                    onCompacting: () =>
+                        writer.write({
+                            type: "data-compaction",
+                            data: { status: "running" },
+                            transient: true,
+                        } as Parameters<typeof writer.write>[0]),
+                });
+                if (compaction) {
+                    await updateMessage(conversationId, { compaction });
+                    writer.write({
+                        type: "data-compaction",
+                        data: { status: "done" },
+                        transient: true,
+                    } as Parameters<typeof writer.write>[0]);
+                }
+            } catch (error) {
+                console.warn(`[compaction] failed: ${error}`);
+            }
+        },
+    });
+
+    pipeUIMessageStreamToResponse({
+        response: res,
+        stream,
+        // Tees the SSE stream to an independent consumer, so the turn — and the
+        // in-band compaction — runs to completion (and onFinish persists it) even
+        // if the client disconnects mid-stream.
+        consumeSseStream: consumeStream,
     });
 }
 

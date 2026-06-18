@@ -28,6 +28,7 @@ import {
 import { searchTools, webSearchPrompt } from "./search";
 import { buildFileTools, filesPrompt } from "./files";
 import { buildNoteTools, notesPrompt } from "./notes";
+import { buildConversationSearchTools, conversationSearchPrompt } from "./conversation-search";
 import { loadSystemPrompt } from "./system-prompt";
 import { nextRunAfter } from "./cron-schedule";
 
@@ -122,6 +123,7 @@ async function executeCronJob(
     webSearchPrompt,
     filesPrompt,
     notesPrompt,
+    conversationSearchPrompt,
     "This is a scheduled recurring task running unattended: the user is not present to answer questions, so complete the task with the information available and present the result directly.",
   ]
     .filter(Boolean)
@@ -141,6 +143,11 @@ async function executeCronJob(
       ...searchTools,
       ...buildFileTools(conversation.id),
       ...buildNoteTools(agent.id, user.id),
+      ...buildConversationSearchTools({
+        agentId: agent.id,
+        viewerId: user.id,
+        currentConversationId: conversation.id,
+      }),
     },
     stopWhen: stepCountIs(8),
   });

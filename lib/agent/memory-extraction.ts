@@ -7,12 +7,14 @@ import {
   type UIMessage,
 } from "ai";
 import { chatModelFromSettings } from "../global/ai";
-import { resolveDefaultChatModel } from "./default-model";
+import { resolveDefaultChatModelAndTarget } from "./default-model";
 import { getAgent, type Agent } from "../db/agents";
 import { getProviderSetting } from "../db/provider-settings";
 import { buildMemoryTools, type MemoryScope } from "./memory";
 import { getMemoryConversation, saveMemoryConversation } from "../db/memory-conversations";
 import { ATTACHED_FILES_MARKER } from "./files";
+import { compactMemoryLog, usageTokens } from "./compaction";
+import type { ContextTarget } from "./context";
 
 // A dedicated model whose only job is to mine durable facts out of chats. It
 // runs in the background after every turn (the main chat model still has its
@@ -43,13 +45,26 @@ function isMachineTextPart(text: string): boolean {
 // The agent's configured memory model, resolved against the owner's provider
 // settings exactly like a chat request (mirrors cron's resolveJobModel). Falls
 // back to the owner's default model (then env) when unset — or when the
-// provider has been deconfigured since it was chosen, so extraction keeps working.
-async function resolveMemoryModel(agent: Agent) {
-  if (!agent.memoryProvider) return resolveDefaultChatModel(agent.ownerId);
+// provider has been deconfigured since it was chosen, so extraction keeps
+// working. Returns the target too (null = env default) for the context-window
+// lookup that drives auto-compaction of the running log.
+async function resolveMemoryModel(
+  agent: Agent
+): Promise<{ model: Awaited<ReturnType<typeof resolveDefaultChatModelAndTarget>>["model"]; target?: ContextTarget }> {
+  if (!agent.memoryProvider) {
+    const { model, target } = await resolveDefaultChatModelAndTarget(agent.ownerId);
+    return { model, target: target ?? undefined };
+  }
   const setting = await getProviderSetting(agent.ownerId, agent.memoryProvider);
   const modelId = agent.memoryModel ?? setting?.settings.model;
-  if (!setting || !modelId) return resolveDefaultChatModel(agent.ownerId);
-  return chatModelFromSettings(agent.memoryProvider, setting.settings, modelId);
+  if (!setting || !modelId) {
+    const { model, target } = await resolveDefaultChatModelAndTarget(agent.ownerId);
+    return { model, target: target ?? undefined };
+  }
+  return {
+    model: chatModelFromSettings(agent.memoryProvider, setting.settings, modelId),
+    target: { provider: agent.memoryProvider, settings: setting.settings, model: modelId },
+  };
 }
 
 // The plain text the person (or assistant) actually wrote — reasoning and
@@ -61,20 +76,44 @@ function messageText(message: UIMessage): string {
     .trim();
 }
 
+type ExtractionParams = {
+  conversationId: string;
+  scope: MemoryScope;
+  messages: UIMessage[];
+};
+
+// Serialize extractions per source conversation. Each call read-modify-writes
+// the single memory_conversations row (read the log → run the model → overwrite)
+// and the model run is slow, so fast successive turns would otherwise overlap
+// and clobber each other's writes, dropping whole exchanges from the log.
+// Chaining per conversation makes each extraction read the latest log only after
+// the previous one saved. In-process is enough — the app runs as one process.
+const queues = new Map<string, Promise<void>>();
+
 /**
  * Feed the just-finished turn (last user message + complete assistant response)
  * to the background memory model and let it create/update memories. Appends to
  * this conversation's running memory conversation so the extractor keeps the
- * context of what it has already stored across turns.
+ * context of what it has already stored across turns. Calls for the same
+ * conversation are serialized (see `queues`) so fast turns can't clobber the log.
  *
  * Best-effort: callers invoke it fire-and-forget from onFinish, so it must
  * never throw into the request path — failures are logged and swallowed.
  */
-export async function runMemoryExtraction(params: {
-  conversationId: string;
-  scope: MemoryScope;
-  messages: UIMessage[];
-}): Promise<void> {
+export function runMemoryExtraction(params: ExtractionParams): Promise<void> {
+  const { conversationId } = params;
+  const prev = queues.get(conversationId) ?? Promise.resolve();
+  // A prior turn's failure must not break the chain for later turns.
+  const next = prev.catch(() => {}).then(() => extractTurn(params));
+  queues.set(conversationId, next);
+  // Drop the entry once the chain drains so the map can't grow unbounded.
+  void next.catch(() => {}).finally(() => {
+    if (queues.get(conversationId) === next) queues.delete(conversationId);
+  });
+  return next;
+}
+
+async function extractTurn(params: ExtractionParams): Promise<void> {
   const { conversationId, scope, messages } = params;
 
   const reversed = [...messages].reverse();
@@ -103,9 +142,10 @@ export async function runMemoryExtraction(params: {
   const prior = (await getMemoryConversation(conversationId))?.messages ?? [];
   const history: ModelMessage[] = [...prior, { role: "user", content: exchange }];
 
+  const { model: memoryModel, target: memoryTarget } = await resolveMemoryModel(agent);
   const result = await generateText({
     model: wrapLanguageModel({
-      model: await resolveMemoryModel(agent),
+      model: memoryModel,
       middleware: extractReasoningMiddleware({ tagName: "think" }),
     }),
     system: MEMORY_EXTRACTION_SYSTEM_PROMPT,
@@ -115,10 +155,20 @@ export async function runMemoryExtraction(params: {
     stopWhen: stepCountIs(8),
   });
 
-  // Persist the appended exchange plus the extractor's reply (its tool calls and
-  // results included), so the next turn resumes with full context.
-  await saveMemoryConversation(conversationId, scope.agentId, [
-    ...history,
-    ...result.response.messages,
-  ]);
+  // The appended exchange plus the extractor's reply (its tool calls and results
+  // included), so the next turn resumes with full context.
+  const full: ModelMessage[] = [...history, ...result.response.messages];
+
+  // Auto-compaction: this log grows for the whole lifetime of the source
+  // conversation and is re-sent in full each turn, so it must be bounded.
+  // Destructive — the durable facts already live in the memory store, so once
+  // the threshold is crossed the older log is collapsed to [summary, ...tail].
+  const compacted = await compactMemoryLog({
+    model: memoryModel,
+    target: memoryTarget,
+    messages: full,
+    usedTokens: usageTokens(result.totalUsage),
+  });
+
+  await saveMemoryConversation(conversationId, scope.agentId, compacted);
 }

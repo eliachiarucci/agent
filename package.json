@@ -10,6 +10,7 @@
     "db:push": "drizzle-kit push",
     "users": "tsx scripts/users.ts",
     "reembed": "tsx scripts/reembed.ts",
+    "backfill:search": "tsx scripts/backfill-search-text.ts",
     "calibrate": "tsx scripts/calibrate-embeddings.ts",
     "db:studio": "drizzle-kit studio",
     "test": "vitest run --project unit --project api",
