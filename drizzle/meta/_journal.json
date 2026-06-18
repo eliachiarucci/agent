@@ -29,6 +29,27 @@
       "when": 1781171220854,
       "tag": "0003_youthful_wonder_man",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781802219857,
+      "tag": "0004_curly_reaper",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781804049500,
+      "tag": "0005_dazzling_taskmaster",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781807221169,
+      "tag": "0006_foamy_trish_tilby",
+      "breakpoints": true
     }
   ]
 }

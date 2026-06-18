@@ -1,6 +1,12 @@
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "../global/db";
-import { agentMembers, agents, users, type AgentMemberRole } from "../global/schema";
+import {
+  agentMembers,
+  agents,
+  users,
+  type AgentMemberRole,
+  type ProviderType,
+} from "../global/schema";
 
 export type Agent = typeof agents.$inferSelect;
 
@@ -27,7 +33,13 @@ export async function getAgent(id: string): Promise<Agent | undefined> {
 
 export async function updateAgent(
   id: string,
-  changes: { name?: string; systemPrompt?: string | null }
+  changes: {
+    name?: string;
+    systemPrompt?: string | null;
+    // Set together (or both null to reset to the env default).
+    memoryProvider?: ProviderType | null;
+    memoryModel?: string | null;
+  }
 ): Promise<Agent | undefined> {
   const [row] = await db.update(agents).set(changes).where(eq(agents.id, id)).returning();
   return row;

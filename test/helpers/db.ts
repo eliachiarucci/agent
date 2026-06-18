@@ -8,8 +8,9 @@ import { createAgent } from "../../lib/db/agents";
 export async function resetDb(): Promise<void> {
   await db.execute(sql`
     truncate table
-      cron_job_runs, cron_jobs, notes, conversations, memories, agent_members, agents,
-      provider_settings, session, account, verification, two_factor, passkey, users
+      memory_conversations, cron_job_runs, cron_jobs, notes, conversations, memories,
+      agent_members, agents, provider_settings, user_settings, session, account,
+      verification, two_factor, passkey, users
     cascade
   `);
 }

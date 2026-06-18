@@ -5,7 +5,8 @@ import {
   wrapLanguageModel,
   type UIMessage,
 } from "ai";
-import { chatModelFromSettings, defaultChatModel } from "../global/ai";
+import { chatModelFromSettings } from "../global/ai";
+import { resolveDefaultChatModel } from "./default-model";
 import { getProviderSetting } from "../db/provider-settings";
 import {
   claimCronJob,
@@ -31,14 +32,14 @@ import { loadSystemPrompt } from "./system-prompt";
 import { nextRunAfter } from "./cron-schedule";
 
 // The job's stored provider/model resolved against the creator's current
-// provider settings, exactly like a chat request. Falls back to the env
-// default when unset — or when the provider has been deconfigured since the
-// job was created, so old jobs keep running.
+// provider settings, exactly like a chat request. Falls back to the creator's
+// default model (then env) when unset — or when the provider has been
+// deconfigured since the job was created, so old jobs keep running.
 async function resolveJobModel(job: CronJob) {
-  if (!job.provider) return defaultChatModel();
+  if (!job.provider) return resolveDefaultChatModel(job.userId);
   const setting = await getProviderSetting(job.userId, job.provider);
   const modelId = job.model ?? setting?.settings.model;
-  if (!setting || !modelId) return defaultChatModel();
+  if (!setting || !modelId) return resolveDefaultChatModel(job.userId);
   return chatModelFromSettings(job.provider, setting.settings, modelId);
 }
 

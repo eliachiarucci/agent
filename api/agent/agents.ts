@@ -1,5 +1,6 @@
 import express from 'express';
 import { z } from "zod";
+import { PROVIDER_TYPES } from "../../lib/global/providers";
 import { getSessionUser } from "../../lib/agent/actor";
 import { removeConversationFiles } from "../../lib/agent/files";
 import { findConversationIds } from "../../lib/db/conversations";
@@ -57,10 +58,19 @@ const updateSchema = z
         name: z.string().min(1).optional(),
         // null/empty clears the prompt back to "no custom instructions".
         system_prompt: z.string().nullable().optional(),
+        // The background memory extractor's model. Set as a pair (null on both
+        // resets to the env-configured default model).
+        memory_provider: z.enum(PROVIDER_TYPES).nullable().optional(),
+        memory_model: z.string().min(1).nullable().optional(),
     })
-    .refine((d) => d.name !== undefined || d.system_prompt !== undefined, {
-        message: "Nothing to update",
-    });
+    .refine(
+        (d) =>
+            d.name !== undefined ||
+            d.system_prompt !== undefined ||
+            d.memory_provider !== undefined ||
+            d.memory_model !== undefined,
+        { message: "Nothing to update" }
+    );
 
 export const PATCH: express.RequestHandler = async (req, res) => {
     const parsed = updateSchema.safeParse(req.body);
@@ -85,11 +95,13 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { name, system_prompt } = parsed.data;
+    const { name, system_prompt, memory_provider, memory_model } = parsed.data;
     res.json(
         await updateAgent(agent.id, {
             ...(name !== undefined && { name }),
             ...(system_prompt !== undefined && { systemPrompt: system_prompt?.trim() || null }),
+            ...(memory_provider !== undefined && { memoryProvider: memory_provider }),
+            ...(memory_model !== undefined && { memoryModel: memory_model }),
         })
     );
 }

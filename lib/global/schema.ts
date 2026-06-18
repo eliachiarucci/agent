@@ -13,7 +13,7 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { UIMessage } from "ai";
+import type { ModelMessage, UIMessage } from "ai";
 
 // Rows written before the UI message stream migration; still readable.
 export type LegacyMessage = { role: "user" | "assistant"; content: string };
@@ -122,6 +122,11 @@ export const agents = pgTable("agents", {
   // Owner-written instructions appended to the built-in system prompt on every
   // turn. Session-stable, so it doesn't break KV-cache reuse (docs/memory.md).
   systemPrompt: text("system_prompt"),
+  // Model the background memory extractor runs on for this agent
+  // (lib/agent/memory-extraction.ts), resolved against the owner's provider
+  // settings like a chat request. NULL → the env-configured default model.
+  memoryProvider: text("memory_provider").$type<ProviderType>(),
+  memoryModel: text("memory_model"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -166,6 +171,32 @@ export const conversations = pgTable(
   (t) => [index("conversations_agent_idx").on(t.agentId)]
 );
 
+// One row per source conversation: the running message history of the
+// background memory-extraction model (lib/agent/memory-extraction.ts). After
+// each turn of the source conversation, the latest exchange (last user message
+// + complete assistant response) is appended here as a user message and the
+// extractor's reply — including its memory tool calls — is stored, so it keeps
+// context of what it has already saved across turns. Stored as ModelMessages
+// (the extractor runs headless via generateText and is never rendered in the
+// UI), unlike conversations which keep UIMessages. Deleting the source
+// conversation cascades here.
+export const memoryConversations = pgTable(
+  "memory_conversations",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    messages: jsonb("messages").notNull().$type<ModelMessage[]>(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("memory_conversations_conversation_idx").on(t.conversationId)]
+);
+
 export const PROVIDER_TYPES = ["lmstudio", "anthropic", "google", "deepinfra"] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
@@ -195,6 +226,18 @@ export const providerSettings = pgTable(
   },
   (t) => [uniqueIndex("provider_settings_user_provider_idx").on(t.userId, t.provider)]
 );
+
+// Per-user prefs. defaultProvider/defaultModel = the chat model used when none
+// is picked for a turn, and the fallback for cron/memory work; NULL → env CHAT_MODEL.
+export const userSettings = pgTable("user_settings", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  defaultProvider: text("default_provider").$type<ProviderType>(),
+  defaultModel: text("default_model"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
 
 // "once" jobs (reminders) are deleted after their first successful run.
 export const CRON_RECURRENCES = ["once", "weekly", "biweekly", "monthly"] as const;

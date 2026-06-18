@@ -1,6 +1,7 @@
 import express from 'express';
 import { z } from "zod";
 import { getContextWindow } from "../../lib/agent/context";
+import { resolveDefaultModelTarget } from "../../lib/agent/default-model";
 import { getSessionUser } from "../../lib/agent/actor";
 import { getProviderSetting } from "../../lib/db/provider-settings";
 import { PROVIDER_TYPES } from "../../lib/global/providers";
@@ -23,12 +24,15 @@ export const GET: express.RequestHandler = async (req, res) => {
     }
 
     const { provider, model } = parsed.data;
+    const user = await getSessionUser(req);
+
+    // No explicit selection → the user's configured default model (else env).
     if (!provider) {
-        res.json(await getContextWindow());
+        const target = user ? await resolveDefaultModelTarget(user.id) : null;
+        res.json(await getContextWindow(target ?? undefined));
         return;
     }
 
-    const user = await getSessionUser(req);
     if (!user) {
         res.status(401).json({ error: "Not authenticated" });
         return;

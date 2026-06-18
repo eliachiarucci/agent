@@ -226,7 +226,7 @@ export async function buildMemorySystemPrompt(
 // queries measure ~0.35-0.45 and direct hits ~0.53-0.69 (`npm run calibrate`).
 // 0.48 splits the bands with margin on both sides; test/ai/rag.test.ts guards
 // this calibration — re-measure if the embedding model or phrasing changes.
-const AUTO_RECALL_MIN_RELEVANCE = 0.48;
+const AUTO_RECALL_MIN_RELEVANCE = 0.46;
 const AUTO_RECALL_LIMIT = 4;
 
 export async function buildRelevantMemoriesBlock(

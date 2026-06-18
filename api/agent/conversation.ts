@@ -9,7 +9,8 @@ import {
     type UIMessage,
 } from "ai";
 import { z } from "zod";
-import { chatModelFromSettings, defaultChatModel } from "../../lib/global/ai";
+import { chatModelFromSettings } from "../../lib/global/ai";
+import { resolveDefaultChatModel } from "../../lib/agent/default-model";
 import { PROVIDER_TYPES } from "../../lib/global/providers";
 import { getProviderSetting } from "../../lib/db/provider-settings";
 import {
@@ -38,6 +39,7 @@ import {
     removeConversationFiles,
 } from "../../lib/agent/files";
 import { buildNoteTools, notesPrompt } from "../../lib/agent/notes";
+import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
 
@@ -147,8 +149,8 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     // Resolve the model before any rows are written, so a bad selection is a
-    // clean 4xx. No selection → the env-configured default (original behavior).
-    let chatModel = defaultChatModel();
+    // clean 4xx. No selection → the user's configured default (else env).
+    let chatModel = await resolveDefaultChatModel(user.id);
     if (provider) {
         const setting = await getProviderSetting(user.id, provider);
         if (!setting) {
@@ -350,6 +352,13 @@ export const POST: express.RequestHandler = async (req, res) => {
         onError: (error) => (error instanceof Error ? error.message : "An error occurred."),
         onFinish: async ({ messages }) => {
             await updateMessage(conversationId, { messages });
+            // Background memory extraction: a dedicated model inspects the just-
+            // finished exchange and stores durable facts (lib/agent/memory-
+            // extraction.ts). Fire-and-forget — it must never block or fail the
+            // turn, so errors are logged and swallowed.
+            void runMemoryExtraction({ conversationId, scope, messages }).catch((error) =>
+                console.warn(`[memory] extraction failed: ${error}`)
+            );
         },
     });
 }

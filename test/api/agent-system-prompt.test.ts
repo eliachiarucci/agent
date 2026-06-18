@@ -66,4 +66,49 @@ describe("agent system prompt", () => {
     const empty = await owner.patch("/agent/agents", { id: agentId });
     expect(empty.status).toBe(400);
   });
+
+  it("lets the owner set, read back, and clear the memory model", async () => {
+    const owner = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const fresh = (await owner.get("/agent/agents")).body[0];
+    // A fresh agent has no memory model: the extractor uses the env default.
+    expect(fresh.memoryProvider).toBeNull();
+    expect(fresh.memoryModel).toBeNull();
+
+    const set = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      memory_provider: "anthropic",
+      memory_model: "claude-opus-4-8",
+    });
+    expect(set.status).toBe(200);
+    expect(set.body.memoryProvider).toBe("anthropic");
+    expect(set.body.memoryModel).toBe("claude-opus-4-8");
+
+    // The list endpoint carries the pair so the picker shows the current choice.
+    const listed = (await owner.get("/agent/agents")).body[0];
+    expect(listed.memoryProvider).toBe("anthropic");
+    expect(listed.memoryModel).toBe("claude-opus-4-8");
+
+    // Clearing both resets to the env default model.
+    const cleared = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      memory_provider: null,
+      memory_model: null,
+    });
+    expect(cleared.body.memoryProvider).toBeNull();
+    expect(cleared.body.memoryModel).toBeNull();
+  });
+
+  it("rejects an unknown memory provider", async () => {
+    const owner = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const agentId: string = (await owner.get("/agent/agents")).body[0].id;
+
+    const bad = await owner.patch("/agent/agents", {
+      id: agentId,
+      memory_provider: "not-a-provider",
+      memory_model: "x",
+    });
+    expect(bad.status).toBe(400);
+  });
 });
