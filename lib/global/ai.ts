@@ -9,7 +9,7 @@ import { streamText } from "ai";
 // model would re-download on every recreation. Deployments point this at a
 // mounted volume.
 if (process.env.TRANSFORMERS_CACHE) transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE;
-import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, lmstudioBaseUrl } from "./providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl } from "./providers";
 import type { ProviderSettingsValue, ProviderType } from "./schema";
 
 export const lmstudio = createOpenAI({
@@ -28,11 +28,6 @@ export const lmstudioChat = createOpenAICompatible({
     includeUsage: true,
 });
 
-/** The env-configured LM Studio model — used when no provider is selected in the UI. */
-export function defaultChatModel() {
-    return lmstudioChat.chatModel(process.env.CHAT_MODEL ?? "google/gemma-4-e4b");
-}
-
 /**
  * Builds a chat model from a user's saved provider settings (provider_settings
  * table, validated shapes in lib/global/providers.ts).
@@ -44,6 +39,13 @@ export function chatModelFromSettings(
 ) {
     if (provider === "anthropic") {
         return createAnthropic({ apiKey: settings.apiKey })(modelId);
+    }
+    // First-party OpenAI via the official provider (handles o-series quirks like
+    // max_completion_tokens and the developer role). .chat() pins it to the Chat
+    // Completions API the rest of the app uses; OpenAI caches prompt prefixes
+    // implicitly, so no explicit cacheControl is needed.
+    if (provider === "openai") {
+        return createOpenAI({ apiKey: settings.apiKey }).chat(modelId);
     }
     // Gemini 2.5+ caches implicitly on stable prompt prefixes (like LM Studio's
     // KV reuse) — no per-request cacheControl opt-in like Anthropic's.
@@ -68,6 +70,15 @@ export function chatModelFromSettings(
         return createOpenAICompatible({
             name: "tensorx",
             baseURL: TENSORX_BASE_URL,
+            apiKey: settings.apiKey,
+            includeUsage: true,
+        }).chatModel(modelId);
+    }
+    // OpenRouter is an OpenAI-compatible aggregator — same setup as DeepInfra.
+    if (provider === "openrouter") {
+        return createOpenAICompatible({
+            name: "openrouter",
+            baseURL: OPENROUTER_BASE_URL,
             apiKey: settings.apiKey,
             includeUsage: true,
         }).chatModel(modelId);

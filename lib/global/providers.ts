@@ -34,6 +34,16 @@ export const providerSchemas = {
     apiKey: z.string().min(1),
     model: z.string().min(1).optional(),
   }),
+  openrouter: z.object({
+    // An API key from the OpenRouter dashboard (openrouter.ai/keys).
+    apiKey: z.string().min(1),
+    model: z.string().min(1).optional(),
+  }),
+  openai: z.object({
+    // A secret API key (sk-...) from platform.openai.com/api-keys.
+    apiKey: z.string().min(1),
+    model: z.string().min(1).optional(),
+  }),
 } satisfies Record<ProviderType, z.ZodType>;
 
 export type LmStudioSettings = z.infer<(typeof providerSchemas)["lmstudio"]>;
@@ -41,6 +51,8 @@ export type AnthropicSettings = z.infer<(typeof providerSchemas)["anthropic"]>;
 export type GoogleSettings = z.infer<(typeof providerSchemas)["google"]>;
 export type DeepInfraSettings = z.infer<(typeof providerSchemas)["deepinfra"]>;
 export type TensorXSettings = z.infer<(typeof providerSchemas)["tensorx"]>;
+export type OpenRouterSettings = z.infer<(typeof providerSchemas)["openrouter"]>;
+export type OpenAISettings = z.infer<(typeof providerSchemas)["openai"]>;
 
 export type ProviderTestResult =
   | { ok: true; models: string[] }
@@ -226,6 +238,115 @@ async function testTensorX(settings: TensorXSettings): Promise<ProviderTestResul
   return { ok: true, models };
 }
 
+// First-party OpenAI API. Chat goes through @ai-sdk/openai (lib/global/ai.ts);
+// this base is only used here to verify the key and list models.
+export const OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+async function testOpenAI(settings: OpenAISettings): Promise<ProviderTestResult> {
+  let res: Response;
+  try {
+    // Listing models requires the key, so it both verifies and lists, free.
+    res = await fetch(`${OPENAI_BASE_URL}/models`, {
+      headers: { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "Could not reach the OpenAI API. Check your network connection." };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, error: "OpenAI rejected the API key. Create one at platform.openai.com/api-keys." };
+  }
+  if (!res.ok) {
+    return { ok: false, error: `OpenAI API responded with HTTP ${res.status}.` };
+  }
+  const models = await parseOpenAIModelIds(res);
+  if (!models) {
+    return { ok: false, error: "Unexpected response from the OpenAI API." };
+  }
+  return { ok: true, models };
+}
+
+// OpenAI's /models listing is the standard OpenAI shape ({ data: [{ id }] }) but
+// carries no capability metadata and mixes in non-chat models (embeddings,
+// image, audio, moderation, legacy completions). With no tag to filter on, we
+// exclude those families by id so the picker only offers chat-capable models.
+const OPENAI_NON_CHAT = /embedding|tts|whisper|dall-e|moderation|image|audio|realtime|transcribe|^(?:davinci|babbage)/i;
+
+async function parseOpenAIModelIds(res: Response): Promise<string[] | undefined> {
+  try {
+    const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
+    if (!Array.isArray(body.data)) return undefined;
+    return body.data
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string")
+      .filter((id) => !OPENAI_NON_CHAT.test(id));
+  } catch {
+    return undefined;
+  }
+}
+
+// OpenAI-compatible aggregator; chat (lib/global/ai.ts), the model listing, and
+// the context-window lookup all hang off this base.
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+async function testOpenRouter(settings: OpenRouterSettings): Promise<ProviderTestResult> {
+  let keyRes: Response;
+  try {
+    // /models is public and ignores the key, so verify the key against /key
+    // (which 401s on a bad token) before listing.
+    keyRes = await fetch(`${OPENROUTER_BASE_URL}/key`, {
+      headers: { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "Could not reach the OpenRouter API. Check your network connection." };
+  }
+  if (keyRes.status === 401 || keyRes.status === 403) {
+    return { ok: false, error: "OpenRouter rejected the API key. Create one at openrouter.ai/keys." };
+  }
+  if (!keyRes.ok) {
+    return { ok: false, error: `OpenRouter API responded with HTTP ${keyRes.status}.` };
+  }
+
+  let modelsRes: Response;
+  try {
+    modelsRes = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "Could not reach the OpenRouter API. Check your network connection." };
+  }
+  if (!modelsRes.ok) {
+    return { ok: false, error: `OpenRouter API responded with HTTP ${modelsRes.status}.` };
+  }
+  const models = await parseOpenRouterModelIds(modelsRes);
+  if (!models) {
+    return { ok: false, error: "Unexpected response from the OpenRouter API." };
+  }
+  return { ok: true, models };
+}
+
+// OpenRouter lists its full catalog at /models; architecture.output_modalities
+// says what each model emits, so we keep only text-producing (chat/VLM) models
+// and drop pure image/audio/video generators.
+async function parseOpenRouterModelIds(res: Response): Promise<string[] | undefined> {
+  try {
+    const body = (await res.json()) as {
+      data?: Array<{ id?: unknown; architecture?: { output_modalities?: unknown } }>;
+    };
+    if (!Array.isArray(body.data)) return undefined;
+    return body.data
+      .filter((m) => {
+        const out = m.architecture?.output_modalities;
+        return !Array.isArray(out) || out.includes("text");
+      })
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string");
+  } catch {
+    return undefined;
+  }
+}
+
 // DeepInfra's listing is OpenAI-shaped but spans every modality it hosts
 // (embeddings, TTS, image-gen, ...); metadata.tags marks the chat models.
 async function parseDeepInfraModelIds(res: Response): Promise<string[] | undefined> {
@@ -281,7 +402,14 @@ async function parseModelIds(res: Response): Promise<string[] | undefined> {
 /** Runs a cheap authenticated request against the provider to verify the settings. */
 export async function testProvider(
   provider: ProviderType,
-  settings: LmStudioSettings | AnthropicSettings | GoogleSettings | DeepInfraSettings | TensorXSettings
+  settings:
+    | LmStudioSettings
+    | AnthropicSettings
+    | GoogleSettings
+    | DeepInfraSettings
+    | TensorXSettings
+    | OpenRouterSettings
+    | OpenAISettings
 ): Promise<ProviderTestResult> {
   switch (provider) {
     case "lmstudio":
@@ -294,5 +422,9 @@ export async function testProvider(
       return testDeepInfra(settings as DeepInfraSettings);
     case "tensorx":
       return testTensorX(settings as TensorXSettings);
+    case "openrouter":
+      return testOpenRouter(settings as OpenRouterSettings);
+    case "openai":
+      return testOpenAI(settings as OpenAISettings);
   }
 }

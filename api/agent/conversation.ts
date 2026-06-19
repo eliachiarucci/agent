@@ -166,9 +166,10 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     // Resolve the model before any rows are written, so a bad selection is a
-    // clean 4xx. No selection → the user's configured default (else env). The
-    // target (null = env default) is captured for the post-turn context-window
-    // lookup that drives auto-compaction.
+    // clean 4xx. No selection in the request → the user's configured default.
+    // There is no server default: with neither, the turn is rejected (the UI
+    // blocks sending in this state). The target is captured for the post-turn
+    // context-window lookup that drives auto-compaction.
     let { model: chatModel, target: contextTarget } = await resolveDefaultChatModelAndTarget(
         user.id
     );
@@ -185,6 +186,12 @@ export const POST: express.RequestHandler = async (req, res) => {
         }
         chatModel = chatModelFromSettings(provider, setting.settings, modelId);
         contextTarget = { provider, settings: setting.settings, model: modelId };
+    }
+    if (!chatModel) {
+        res.status(400).json({
+            error: "No model selected. Choose a default model in Settings → Models.",
+        });
+        return;
     }
 
     // Create-if-missing: the client generates the UUID for new conversations so it

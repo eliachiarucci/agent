@@ -35,8 +35,9 @@ import { nextRunAfter } from "./cron-schedule";
 
 // The job's stored provider/model resolved against the creator's current
 // provider settings, exactly like a chat request. Falls back to the creator's
-// default model (then env) when unset — or when the provider has been
-// deconfigured since the job was created, so old jobs keep running.
+// default model when unset — or when the provider has been deconfigured since
+// the job was created, so old jobs keep running. null when the creator has no
+// default model either (the run records an error).
 async function resolveJobModel(job: CronJob) {
   if (!job.provider) return resolveDefaultChatModel(job.userId);
   const setting = await getProviderSetting(job.userId, job.provider);
@@ -131,8 +132,14 @@ async function executeCronJob(
     .filter(Boolean)
     .join("\n\n");
 
+  const resolvedModel = await resolveJobModel(job);
+  if (!resolvedModel) {
+    throw new Error(
+      "No model configured. Pick a model for this job, or set a default model in Settings → Models."
+    );
+  }
   const model = wrapLanguageModel({
-    model: await resolveJobModel(job),
+    model: resolvedModel,
     middleware: extractReasoningMiddleware({ tagName: "think" }),
   });
 

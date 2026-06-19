@@ -2,7 +2,7 @@
 // a bespoke REST API, Anthropic and Google publish per-model limits via their
 // model endpoints), so the rest of the app only depends on getContextWindow().
 
-import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, lmstudioBaseUrl } from "../global/providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl } from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 
 export type ContextWindow = {
@@ -69,6 +69,20 @@ async function tensorxContextWindow(apiKey: string, model: string): Promise<numb
     return info?.max_input_tokens ?? info?.max_tokens ?? null;
 }
 
+// OpenRouter's public /models listing carries each model's context_length;
+// top_provider.context_length is what the default route actually serves, so we
+// prefer it (conservative for compaction) and fall back to the headline max.
+// The listing needs no key.
+async function openrouterContextWindow(model: string): Promise<number | null> {
+    const res = await fetch(`${OPENROUTER_BASE_URL}/models`);
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+        data?: Array<{ id?: string; context_length?: number; top_provider?: { context_length?: number } }>;
+    };
+    const m = body.data?.find((x) => x.id === model);
+    return m?.top_provider?.context_length ?? m?.context_length ?? null;
+}
+
 async function googleContextWindow(apiKey: string, model: string): Promise<number | null> {
     const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`,
@@ -84,11 +98,12 @@ async function googleContextWindow(apiKey: string, model: string): Promise<numbe
 const cache = new Map<string, { value: ContextWindow; expiresAt: number }>();
 
 export async function getContextWindow(target?: ContextTarget): Promise<ContextWindow> {
-    const model = target?.model ?? process.env.CHAT_MODEL ?? "google/gemma-4-e4b";
-    const baseUrl = target
-        ? lmstudioBaseUrl(target.settings.url ?? "http://localhost:1234")
-        : process.env.LMSTUDIO_URL ?? "http://localhost:1234";
-    const key = `${target?.provider ?? "default"}:${baseUrl}:${model}`;
+    // No target → no default model configured. There is no server fallback, so
+    // the window is simply unknown (the UI shows "select a model").
+    if (!target?.model) return { model: "", contextLength: null };
+    const { model } = target;
+    const baseUrl = lmstudioBaseUrl(target.settings.url ?? "http://localhost:1234");
+    const key = `${target.provider}:${baseUrl}:${model}`;
 
     const cached = cache.get(key);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
@@ -101,7 +116,13 @@ export async function getContextWindow(target?: ContextTarget): Promise<ContextW
             ? deepinfraContextWindow(target.settings.apiKey ?? "", model)
             : target?.provider === "tensorx"
               ? tensorxContextWindow(target.settings.apiKey ?? "", model)
-              : lmstudioContextWindow(baseUrl, model)
+              : target?.provider === "openrouter"
+                ? openrouterContextWindow(model)
+                : // OpenAI's API exposes no per-model context length, so the
+                  // window is unknown (compaction falls back to its default).
+                  target?.provider === "openai"
+                  ? Promise.resolve(null)
+                  : lmstudioContextWindow(baseUrl, model)
     ).catch(() => null);
 
     const value: ContextWindow = { model, contextLength };
