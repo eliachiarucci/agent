@@ -9,7 +9,7 @@ import { streamText } from "ai";
 // model would re-download on every recreation. Deployments point this at a
 // mounted volume.
 if (process.env.TRANSFORMERS_CACHE) transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE;
-import { DEEPINFRA_BASE_URL, lmstudioBaseUrl } from "./providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, lmstudioBaseUrl } from "./providers";
 import type { ProviderSettingsValue, ProviderType } from "./schema";
 
 export const lmstudio = createOpenAI({
@@ -58,6 +58,16 @@ export function chatModelFromSettings(
         return createOpenAICompatible({
             name: "deepinfra",
             baseURL: DEEPINFRA_BASE_URL,
+            apiKey: settings.apiKey,
+            includeUsage: true,
+        }).chatModel(modelId);
+    }
+    // TensorX is an OpenAI-compatible inference cloud — same setup as DeepInfra
+    // (reasoning_content parsing + streamed usage), pointed at its base URL.
+    if (provider === "tensorx") {
+        return createOpenAICompatible({
+            name: "tensorx",
+            baseURL: TENSORX_BASE_URL,
             apiKey: settings.apiKey,
             includeUsage: true,
         }).chatModel(modelId);

@@ -26,6 +26,7 @@ import {
   type MemoryScope,
 } from "./memory";
 import { searchTools, webSearchPrompt } from "./search";
+import { buildDateTools, dateToolPrompt } from "./date-tool";
 import { buildFileTools, filesPrompt } from "./files";
 import { buildNoteTools, notesPrompt } from "./notes";
 import { buildConversationSearchTools, conversationSearchPrompt } from "./conversation-search";
@@ -121,6 +122,7 @@ async function executeCronJob(
     agentPrompt,
     memorySystemPrompt,
     webSearchPrompt,
+    dateToolPrompt,
     filesPrompt,
     notesPrompt,
     conversationSearchPrompt,
@@ -141,6 +143,7 @@ async function executeCronJob(
     tools: {
       ...buildMemoryTools(scope),
       ...searchTools,
+      ...buildDateTools(job.timezone),
       ...buildFileTools(conversation.id),
       ...buildNoteTools(agent.id, user.id),
       ...buildConversationSearchTools({

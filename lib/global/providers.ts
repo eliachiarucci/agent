@@ -29,12 +29,18 @@ export const providerSchemas = {
     apiKey: z.string().min(1),
     model: z.string().min(1).optional(),
   }),
+  tensorx: z.object({
+    // An API key from the TensorX dashboard (tensorx.ai).
+    apiKey: z.string().min(1),
+    model: z.string().min(1).optional(),
+  }),
 } satisfies Record<ProviderType, z.ZodType>;
 
 export type LmStudioSettings = z.infer<(typeof providerSchemas)["lmstudio"]>;
 export type AnthropicSettings = z.infer<(typeof providerSchemas)["anthropic"]>;
 export type GoogleSettings = z.infer<(typeof providerSchemas)["google"]>;
 export type DeepInfraSettings = z.infer<(typeof providerSchemas)["deepinfra"]>;
+export type TensorXSettings = z.infer<(typeof providerSchemas)["tensorx"]>;
 
 export type ProviderTestResult =
   | { ok: true; models: string[] }
@@ -136,6 +142,12 @@ async function testGoogle(settings: GoogleSettings): Promise<ProviderTestResult>
 // hang off this base.
 export const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai";
 
+// The OpenAI-compatible /models listing still includes recently-deprecated
+// models (e.g. google/gemini-1.5-flash). DeepInfra's native catalog carries a
+// `deprecated` timestamp per model, keyed by the same id, so we use it to drop
+// dead models from the picker.
+const DEEPINFRA_MODELS_LIST_URL = "https://api.deepinfra.com/models/list";
+
 async function testDeepInfra(settings: DeepInfraSettings): Promise<ProviderTestResult> {
   let res: Response;
   try {
@@ -157,6 +169,59 @@ async function testDeepInfra(settings: DeepInfraSettings): Promise<ProviderTestR
   const models = await parseDeepInfraModelIds(res);
   if (!models) {
     return { ok: false, error: "Unexpected response from the DeepInfra API." };
+  }
+  // Drop models DeepInfra has deprecated but still surfaces on the OpenAI listing.
+  const deprecated = await deepinfraDeprecatedModels();
+  return { ok: true, models: models.filter((id) => !deprecated.has(id)) };
+}
+
+// Ids DeepInfra has marked deprecated (non-null `deprecated` epoch) in its
+// native catalog. Public endpoint, no key needed; on any failure we fail open
+// (empty set) so the picker still lists everything rather than breaking.
+async function deepinfraDeprecatedModels(): Promise<Set<string>> {
+  try {
+    const res = await fetch(DEEPINFRA_MODELS_LIST_URL, {
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+    if (!res.ok) return new Set();
+    const body = (await res.json()) as Array<{ model_name?: unknown; deprecated?: unknown }>;
+    if (!Array.isArray(body)) return new Set();
+    return new Set(
+      body
+        .filter((m) => m.deprecated != null)
+        .map((m) => m.model_name)
+        .filter((name): name is string => typeof name === "string")
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+// OpenAI-compatible endpoint; chat (lib/global/ai.ts) and the model listing both
+// hang off this base.
+export const TENSORX_BASE_URL = "https://api.tensorx.ai/v1";
+
+async function testTensorX(settings: TensorXSettings): Promise<ProviderTestResult> {
+  let res: Response;
+  try {
+    // Listing models authenticates the key without spending any tokens.
+    res = await fetch(`${TENSORX_BASE_URL}/models`, {
+      headers: { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "Could not reach the TensorX API. Check your network connection." };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, error: "TensorX rejected the API key. Create one in the TensorX dashboard (tensorx.ai)." };
+  }
+  if (!res.ok) {
+    return { ok: false, error: `TensorX API responded with HTTP ${res.status}.` };
+  }
+  // TensorX's listing is the standard OpenAI shape ({ data: [{ id }] }).
+  const models = await parseModelIds(res);
+  if (!models) {
+    return { ok: false, error: "Unexpected response from the TensorX API." };
   }
   return { ok: true, models };
 }
@@ -216,7 +281,7 @@ async function parseModelIds(res: Response): Promise<string[] | undefined> {
 /** Runs a cheap authenticated request against the provider to verify the settings. */
 export async function testProvider(
   provider: ProviderType,
-  settings: LmStudioSettings | AnthropicSettings | GoogleSettings | DeepInfraSettings
+  settings: LmStudioSettings | AnthropicSettings | GoogleSettings | DeepInfraSettings | TensorXSettings
 ): Promise<ProviderTestResult> {
   switch (provider) {
     case "lmstudio":
@@ -227,5 +292,7 @@ export async function testProvider(
       return testGoogle(settings as GoogleSettings);
     case "deepinfra":
       return testDeepInfra(settings as DeepInfraSettings);
+    case "tensorx":
+      return testTensorX(settings as TensorXSettings);
   }
 }

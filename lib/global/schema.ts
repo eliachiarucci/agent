@@ -231,7 +231,7 @@ export const memoryConversations = pgTable(
   (t) => [uniqueIndex("memory_conversations_conversation_idx").on(t.conversationId)]
 );
 
-export const PROVIDER_TYPES = ["lmstudio", "anthropic", "google", "deepinfra"] as const;
+export const PROVIDER_TYPES = ["lmstudio", "anthropic", "google", "deepinfra", "tensorx"] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 // Connection settings per provider. Shapes are heterogeneous (LM Studio needs a

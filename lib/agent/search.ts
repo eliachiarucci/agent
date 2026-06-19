@@ -90,5 +90,4 @@ export const webSearchPrompt = [
   "## Web access",
   "- You can search the internet with webSearch and read full pages with readPage.",
   "- Use them for current events or facts you are unsure about instead of guessing; cite the source URL when you rely on a page.",
-  `- Today's date is ${new Date().toISOString().slice(0, 10)}.`,
 ].join("\n");

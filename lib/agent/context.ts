@@ -2,7 +2,7 @@
 // a bespoke REST API, Anthropic and Google publish per-model limits via their
 // model endpoints), so the rest of the app only depends on getContextWindow().
 
-import { DEEPINFRA_BASE_URL, lmstudioBaseUrl } from "../global/providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, lmstudioBaseUrl } from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 
 export type ContextWindow = {
@@ -53,6 +53,22 @@ async function deepinfraContextWindow(apiKey: string, model: string): Promise<nu
     return body.data?.find((m) => m.id === model)?.metadata?.context_length ?? null;
 }
 
+// TensorX runs on a LiteLLM proxy: its OpenAI-compatible /v1/models listing
+// carries no context length, but LiteLLM's /v1/model/info does, exposing each
+// model's limits under model_info. (A virtual key without info access 403s —
+// caught upstream as an unknown window.)
+async function tensorxContextWindow(apiKey: string, model: string): Promise<number | null> {
+    const res = await fetch(`${TENSORX_BASE_URL}/model/info`, {
+        headers: { authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+        data?: Array<{ model_name?: string; model_info?: { max_input_tokens?: number; max_tokens?: number } }>;
+    };
+    const info = body.data?.find((m) => m.model_name === model)?.model_info;
+    return info?.max_input_tokens ?? info?.max_tokens ?? null;
+}
+
 async function googleContextWindow(apiKey: string, model: string): Promise<number | null> {
     const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`,
@@ -83,7 +99,9 @@ export async function getContextWindow(target?: ContextTarget): Promise<ContextW
           ? googleContextWindow(target.settings.apiKey ?? "", model)
           : target?.provider === "deepinfra"
             ? deepinfraContextWindow(target.settings.apiKey ?? "", model)
-            : lmstudioContextWindow(baseUrl, model)
+            : target?.provider === "tensorx"
+              ? tensorxContextWindow(target.settings.apiKey ?? "", model)
+              : lmstudioContextWindow(baseUrl, model)
     ).catch(() => null);
 
     const value: ContextWindow = { model, contextLength };

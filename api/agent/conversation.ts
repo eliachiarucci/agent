@@ -39,6 +39,7 @@ import {
 } from "../../lib/agent/memory";
 import { searchTools, webSearchPrompt } from "../../lib/agent/search";
 import { buildCronTools, buildCronToolsPrompt } from "../../lib/agent/cron-tools";
+import { buildDateTools, dateToolPrompt } from "../../lib/agent/date-tool";
 import {
     ATTACHED_FILES_MARKER,
     buildFileTools,
@@ -294,6 +295,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         agentPrompt,
         memorySystemPrompt,
         webSearchPrompt,
+        dateToolPrompt,
         filesPrompt,
         notesPrompt,
         conversationSearchPrompt,
@@ -306,6 +308,7 @@ export const POST: express.RequestHandler = async (req, res) => {
     const tools = {
         ...buildMemoryTools(scope),
         ...searchTools,
+        ...buildDateTools(cronScope.timezone),
         ...buildFileTools(conversationId),
         ...buildNoteTools(agentId, user.id),
         ...buildCronTools(cronScope),

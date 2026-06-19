@@ -17,6 +17,7 @@ Detailed docs live in [docs/](docs/) — start with [docs/memory.md](docs/memory
 - **Requirements:** Node 22+, Docker (Postgres + pgvector via `docker compose up -d db`), and LM Studio on `localhost:1234` with a chat model loaded. Embeddings need no LM Studio: they run in-process (EmbeddingGemma via transformers.js/ONNX, ~300MB downloaded and cached on first use).
 - **Backend (this repo):** Express + AI SDK v6 + Drizzle. Files in `api/` are auto-mounted as routes by an esbuild plugin (`api/agent/conversation.ts` → `POST /agent/conversation`); exported `GET`/`POST`/etc. handlers map to methods.
 - `npm run dev` — esbuild watch + server on port 3001. `npm run build` — one-shot build to `dist/index.js` + `dist/users.js` (used by the Dockerfile). `npm run db:push` — push schema changes (schema in `lib/global/schema.ts`).
+- **Checking the code:** there is no `tsc` available (no standalone TypeScript install) — run `npm run build` (esbuild) to verify code compiles and resolves. Do not reach for `npx tsc`.
 - **Migrations:** every schema change must also ship a committed migration: run `npx drizzle-kit generate` and commit `drizzle/` (the release workflow fails on drift). Deployed containers run `migrate()` at startup gated by `MIGRATE=on`; dev/test DBs stay on `db:push` — never set `MIGRATE=on` against a pushed DB (no migrations journal → it fails).
 
 ## Deployment (three repos)
