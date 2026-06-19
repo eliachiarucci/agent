@@ -165,35 +165,6 @@ export const POST: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    // Resolve the model before any rows are written, so a bad selection is a
-    // clean 4xx. No selection in the request → the user's configured default.
-    // There is no server default: with neither, the turn is rejected (the UI
-    // blocks sending in this state). The target is captured for the post-turn
-    // context-window lookup that drives auto-compaction.
-    let { model: chatModel, target: contextTarget } = await resolveDefaultChatModelAndTarget(
-        user.id
-    );
-    if (provider) {
-        const setting = await getProviderSetting(user.id, provider);
-        if (!setting) {
-            res.status(400).json({ error: `Provider "${provider}" is not configured` });
-            return;
-        }
-        const modelId = model ?? setting.settings.model;
-        if (!modelId) {
-            res.status(400).json({ error: `No model selected for provider "${provider}"` });
-            return;
-        }
-        chatModel = chatModelFromSettings(provider, setting.settings, modelId);
-        contextTarget = { provider, settings: setting.settings, model: modelId };
-    }
-    if (!chatModel) {
-        res.status(400).json({
-            error: "No model selected. Choose a default model in Settings → Models.",
-        });
-        return;
-    }
-
     // Create-if-missing: the client generates the UUID for new conversations so it
     // can keep streaming to the same id before the row exists.
     const existing = conversation_id !== undefined ? await findMessage(conversation_id) : undefined;
@@ -221,6 +192,36 @@ export const POST: express.RequestHandler = async (req, res) => {
     const isMember = members.some((m) => m.userId === user.id);
     if (!isMember || (existing && !canAccessConversation(existing, user.id, isMember))) {
         res.status(403).json({ error: "Not allowed to access this conversation" });
+        return;
+    }
+
+    // Resolve the model only after access is granted (so a forbidden request is a
+    // 403, not a model-config 400) but before any rows are written, so a bad
+    // selection is still a clean 4xx. No selection in the request → the user's
+    // configured default. There is no server default: with neither, the turn is
+    // rejected (the UI blocks sending in this state). The target is captured for
+    // the post-turn context-window lookup that drives auto-compaction.
+    let { model: chatModel, target: contextTarget } = await resolveDefaultChatModelAndTarget(
+        user.id
+    );
+    if (provider) {
+        const setting = await getProviderSetting(user.id, provider);
+        if (!setting) {
+            res.status(400).json({ error: `Provider "${provider}" is not configured` });
+            return;
+        }
+        const modelId = model ?? setting.settings.model;
+        if (!modelId) {
+            res.status(400).json({ error: `No model selected for provider "${provider}"` });
+            return;
+        }
+        chatModel = chatModelFromSettings(provider, setting.settings, modelId);
+        contextTarget = { provider, settings: setting.settings, model: modelId };
+    }
+    if (!chatModel) {
+        res.status(400).json({
+            error: "No model selected. Choose a default model in Settings → Models.",
+        });
         return;
     }
 

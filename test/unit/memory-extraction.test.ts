@@ -36,6 +36,8 @@ vi.mock("../../lib/agent/context", () => ({
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { getMemoryConversation } from "../../lib/db/memory-conversations";
 import { createMessage } from "../../lib/db/conversations";
+import { upsertProviderSetting } from "../../lib/db/provider-settings";
+import { upsertUserSettings } from "../../lib/db/user-settings";
 import type { MemoryScope } from "../../lib/agent/memory";
 import { closeDb, makeUserWithAgent, resetDb } from "../helpers/db";
 
@@ -60,6 +62,11 @@ function turn(text: string): UIMessage[] {
 
 async function setupConversation(userName = "Elia") {
   const { user, agent } = await makeUserWithAgent(userName);
+  // The extractor resolves the agent owner's default model (no env fallback
+  // anymore); without one it skips the turn. A dummy LM Studio default is enough
+  // — the model is built lazily and never invoked (generateText is mocked).
+  await upsertProviderSetting(user.id, "lmstudio", { url: "http://localhost:1234", model: "test-model" });
+  await upsertUserSettings(user.id, { defaultProvider: "lmstudio", defaultModel: "test-model" });
   const conv = await createMessage({
     agentId: agent.id,
     userId: user.id,

@@ -61,7 +61,7 @@ describe("provider settings", () => {
     await signUp(client, "Pat");
 
     const unknown = await client.post("/agent/providers", {
-      provider: "openai",
+      provider: "not-a-real-provider",
       settings: { apiKey: "x" },
     });
     expect(unknown.status).toBe(400);
