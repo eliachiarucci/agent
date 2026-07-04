@@ -98,6 +98,14 @@ The AI SDK's native tool-approval flow, end to end:
   to. The continuation streams into the same assistant message
   (`createUIMessageStream({ originalMessages })` reuses its id). Only the turn's
   sender may respond (the pending call runs on their credentials).
+- **Deny-only turns skip the model.** When every decision is a denial there is
+  nothing to execute and the agent doesn't get to reply to a plain "no": the
+  route records the denied results on the conversation (`output-denied`, which
+  the model sees as `execution-denied` on its next turn) and streams only
+  `tool-output-denied` chunks to flip the client's pending parts — no
+  `streamText`, no model needed at all. Mixed batches (some approved) resume
+  the model normally. This path runs before model resolution, so it works even
+  with no model configured.
 - **Targets.** Per-tool derivation (`gmail.ts` `gmailApprovalTargets`):
   `create_draft` → each recipient email (lowercased; one override row per
   recipient, a call is covered only when *all* recipients are). Tools without a

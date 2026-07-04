@@ -266,6 +266,30 @@ export const POST: express.RequestHandler = async (req, res) => {
             res.status(400).json({ error: "tool_approvals must answer every pending approval" });
             return;
         }
+
+        // Every decision is a denial: record it and stop — no model turn. The
+        // denied results stay in the conversation (the model sees them on the
+        // next turn), but the agent doesn't get to reply to a plain "no". The
+        // response stream only flips the client's pending parts to their final
+        // state; it needs no model, so this runs before model resolution.
+        if (tool_approvals.every((a) => !a.approved)) {
+            denyUnansweredApprovals(history, "The user declined.");
+            await updateMessage(existing.id, { messages: history });
+            const stream = createUIMessageStream<UIMessage>({
+                originalMessages: history,
+                generateId: () => crypto.randomUUID(),
+                execute: async ({ writer }) => {
+                    for (const part of pending) {
+                        writer.write({
+                            type: "tool-output-denied",
+                            toolCallId: part.toolCallId,
+                        } as Parameters<typeof writer.write>[0]);
+                    }
+                },
+            });
+            pipeUIMessageStreamToResponse({ response: res, stream, consumeSseStream: consumeStream });
+            return;
+        }
     }
 
     // Resolve the model only after access is granted (so a forbidden request is a

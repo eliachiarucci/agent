@@ -3,9 +3,10 @@ import type { UIMessage } from "ai";
 import { serverUrl } from "../config";
 import { TestClient } from "../helpers/client";
 import { signUp } from "../helpers/auth";
+import { readChatStream } from "../helpers/sse";
 import { closeDb, resetDb } from "../helpers/db";
 import { addToolApprovals, listToolApprovals } from "../../lib/db/tool-approvals";
-import { createMessage } from "../../lib/db/conversations";
+import { createMessage, findMessage } from "../../lib/db/conversations";
 
 const BASE = serverUrl("api");
 
@@ -173,6 +174,40 @@ describe("conversation tool_approvals validation", () => {
         })
       ).status
     ).toBe(400);
+  });
+
+  it("records denials without a model turn (agent does not reply)", async () => {
+    const client = new TestClient(BASE);
+    const user = await signUp(client, "Pat");
+    const agentId = await defaultAgentId(client);
+    const paused = await pausedConversation(user.id, agentId);
+
+    // No provider/model is configured for Pat: a deny-only decision must still
+    // succeed, because it never invokes a model.
+    const res = await client.request("/agent/conversation", {
+      method: "POST",
+      body: JSON.stringify({
+        conversation_id: paused.id,
+        tool_approvals: [{ approval_id: "appr-1", approved: false }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const turn = await readChatStream(res);
+    // The stream only flips the pending part to its final state: no text, no
+    // new tool calls.
+    expect(turn.text).toBe("");
+    expect(turn.toolCalls).toEqual([]);
+    expect(turn.events.some((e) => e.type === "tool-output-denied" && e.toolCallId === "call-1")).toBe(
+      true
+    );
+
+    // The denial is persisted on the conversation; no assistant reply was added.
+    const stored = await findMessage(paused.id);
+    const messages = (stored?.messages ?? []) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    const part = messages[1].parts[0] as { state: string; approval?: { approved: boolean } };
+    expect(part.state).toBe("output-denied");
+    expect(part.approval?.approved).toBe(false);
   });
 
   it("only lets the turn's sender respond", async () => {
