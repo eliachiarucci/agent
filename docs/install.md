@@ -59,6 +59,7 @@ agent users create <username> [--name "Full Name"]
 agent users remove <username>
 agent config get [key]           Show configuration
 agent config set <key> <value>   port, appOrigin, startWebUi
+agent backup [path] [--files]    Dump the database (and, with --files, agent-created files)
 agent update                     Update CLI, images, and database schema
 agent self-update                Update only the CLI binary
 agent uninstall                  Remove the stack (data wiped only on typed confirm)
@@ -156,6 +157,47 @@ The update sequence:
    update stays retryable.
 5. Once the stack is healthy, the previous backend/UI image tags are removed
    (best-effort) so updates don't accumulate old images on disk.
+
+## Backups
+
+Two ways to take one, same artifact (a `pg_dump --format=custom` archive, restorable
+with `pg_restore`):
+
+- **`agent backup [path] [--files]`** — runs pg_dump inside the db container (so
+  versions always match) and writes `agent-backup-YYYY-MM-DD.dump` to the current
+  directory or the given path. `--files` additionally archives agent-created files
+  (the `files` volume, `FILES_DIR`) to `agent-files-YYYY-MM-DD.tar.gz` — those live
+  outside the database, so grab them too for a complete backup. Cron-friendly.
+- **Settings → General → Download backup** — `GET /agent/backup`; the app image ships
+  `postgresql-client-18` for this (keep its major version ≥ the `pgvector/pgvector`
+  image's).
+
+The dump contains every user's data, including provider API keys and connector tokens,
+and any signed-in user can take one from the UI — hand out accounts accordingly.
+
+Restoring is a host-side operation, never an upload:
+
+```sh
+agent stop
+docker compose -f ~/.agent/runtime/docker-compose.yml up -d db
+docker compose -f ~/.agent/runtime/docker-compose.yml exec -T db \
+  sh -c 'dropdb -U agent --if-exists agent && createdb -U agent agent &&
+         pg_restore -U agent -d agent --no-owner' < agent-backup-YYYY-MM-DD.dump
+agent start
+```
+
+A `--files` archive is restored into the running app container:
+
+```sh
+docker compose -f ~/.agent/runtime/docker-compose.yml exec -T app \
+  tar -xzf - -C /files < agent-files-YYYY-MM-DD.tar.gz
+```
+
+Restoring an **older** backup into a **newer** release is supported: the dump carries
+the Drizzle migrations journal, so the app applies the missing migrations at startup
+(`MIGRATE=on`). The reverse — a newer dump into an older release — is not: the schema
+would be ahead of what the code expects. If the backup predates a change of
+`EMBEDDING_MODEL`/`EMBEDDING_DTYPE`, run `npm run reembed` afterwards (docs/memory.md).
 
 ## Releasing (maintainers)
 

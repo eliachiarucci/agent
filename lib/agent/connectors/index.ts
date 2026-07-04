@@ -6,7 +6,7 @@ import {
   buildGmailTools,
   GMAIL_SCOPES,
   gmailApprovalTargetsFor,
-  gmailPrompt,
+  gmailPromptFor,
   gmailToolInfo,
   type ConnectorToolInfo,
 } from "./gmail";
@@ -76,7 +76,7 @@ export async function buildConnectorTools(opts: {
     );
     if (Object.keys(gmailTools).length > 0) {
       Object.assign(tools, gmailTools);
-      prompts.push(gmailPrompt);
+      prompts.push(gmailPromptFor(gmailTools));
     }
   }
 

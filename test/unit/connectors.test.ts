@@ -308,8 +308,16 @@ describe("tool permissions", () => {
   });
 
   it('filters gmail tools: missing keys mean allow; headless withholds "ask" like "deny"', () => {
+    // send_email is the one catalog entry whose unset default is "ask", so a
+    // headless run with no saved levels gets everything except it.
     const all = buildGmailTools("user-1");
-    expect(Object.keys(all).sort()).toEqual(gmailToolInfo.map((t) => t.name).sort());
+    expect(all.send_email).toBeUndefined();
+    expect(Object.keys(all).sort()).toEqual(
+      gmailToolInfo
+        .filter((t) => t.name !== "send_email")
+        .map((t) => t.name)
+        .sort()
+    );
 
     // No approval scope (headless, e.g. cron): nobody is there to ask.
     const filtered = buildGmailTools("user-1", {
@@ -319,8 +327,36 @@ describe("tool permissions", () => {
     });
     expect(filtered.create_draft).toBeUndefined();
     expect(filtered.get_thread).toBeUndefined();
+    expect(filtered.send_email).toBeUndefined();
     expect(filtered.search_threads).toBeDefined();
-    expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 2);
+    expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 3);
+
+    // An explicit "allow" overrides send_email's "ask" default, even headless.
+    const allowed = buildGmailTools("user-1", { send_email: "allow" });
+    expect(allowed.send_email).toBeDefined();
+    expect(allowed.send_email?.needsApproval).toBeUndefined();
+  });
+
+  it('send_email defaults to "ask": offered with a needsApproval gate in interactive runs', async () => {
+    const { user, agent } = await makeUserWithAgent("Sender");
+    const tools = buildGmailTools(user.id, undefined, { agentId: agent.id });
+    expect(tools.send_email).toBeDefined();
+    const needsApproval = tools.send_email?.needsApproval as (input: unknown) => Promise<boolean>;
+    expect(typeof needsApproval).toBe("function");
+
+    const input = { to: ["John@Doe.com"], subject: "hi", body: "hello" };
+    expect(await needsApproval(input)).toBe(true);
+
+    // Standing approvals target recipients, exactly like create_draft.
+    await addToolApprovals({
+      userId: user.id,
+      agentId: agent.id,
+      connector: "gmail",
+      tool: "send_email",
+      targets: ["john@doe.com"],
+    });
+    expect(await needsApproval(input)).toBe(false);
+    expect(await needsApproval({ ...input, cc: ["jane@doe.com"] })).toBe(true);
   });
 
   it('offers "ask" tools with a needsApproval gate in interactive runs', async () => {
@@ -436,14 +472,17 @@ describe("buildConnectorTools", () => {
       gmail: { label_thread: "deny", unlabel_thread: "ask" },
     });
 
+    // Headless: the two saved levels are withheld, plus send_email's "ask" default.
     const result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(result.prompt).toContain("## Gmail");
+    expect(result.prompt).toContain("you can never send");
     expect(result.tools.search_threads).toBeDefined();
     expect(result.tools.label_thread).toBeUndefined();
     expect(result.tools.unlabel_thread).toBeUndefined();
-    expect(Object.keys(result.tools)).toHaveLength(gmailToolInfo.length - 2);
+    expect(Object.keys(result.tools)).toHaveLength(gmailToolInfo.length - 3);
 
-    // Interactive (chat): "ask" tools are offered, gated by needsApproval.
+    // Interactive (chat): "ask" tools are offered, gated by needsApproval, and
+    // the prompt's send guidance flips with send_email available.
     const interactive = await buildConnectorTools({
       userId: user.id,
       agentId: agent.id,
@@ -452,10 +491,14 @@ describe("buildConnectorTools", () => {
     expect(interactive.tools.label_thread).toBeUndefined();
     expect(interactive.tools.unlabel_thread).toBeDefined();
     expect(interactive.tools.unlabel_thread?.needsApproval).toBeDefined();
+    expect(interactive.tools.send_email).toBeDefined();
+    expect(interactive.prompt).not.toContain("you can never send");
+    expect(interactive.prompt).toContain("send_email sends immediately");
 
-    // A different agent has no levels saved → full toolset.
+    // A different agent has no levels saved → full toolset minus the
+    // default-"ask" send_email (headless run).
     const full = await buildConnectorTools({ userId: user.id, agentId: other.id });
-    expect(Object.keys(full.tools)).toHaveLength(gmailToolInfo.length);
+    expect(Object.keys(full.tools)).toHaveLength(gmailToolInfo.length - 1);
   });
 
   it("withholds the prompt when every tool is denied", async () => {
@@ -560,6 +603,50 @@ describe("gmail tools against a stubbed API", () => {
 
     const raw = await (tools.get_thread as any).execute({ thread_id: "t1", raw: true }, {});
     expect(raw.messages[0].body).toBe("<p>see <b>attached</b></p>");
+  });
+
+  it("send_email posts to /messages/send with reply threading headers", async () => {
+    const { user } = await connectedUser();
+    const fetchMock = vi.fn(async (url: any) => {
+      const path = String(url);
+      if (path.includes("/messages/m1?")) {
+        return jsonResponse({
+          id: "m1",
+          threadId: "t1",
+          payload: {
+            headers: [
+              { name: "Message-ID", value: "<orig@example.com>" },
+              { name: "References", value: "<root@example.com>" },
+            ],
+          },
+        });
+      }
+      if (path.endsWith("/messages/send")) {
+        return jsonResponse({ id: "m2", threadId: "t1" });
+      }
+      throw new Error(`unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tools = buildGmailTools(user.id, { send_email: "allow" });
+    const result = await (tools.send_email as any).execute(
+      {
+        to: ["alice@example.com"],
+        subject: "Re: Dinner",
+        body: "See you then!",
+        reply_to_message_id: "m1",
+      },
+      {}
+    );
+    expect(result).toEqual({ message_id: "m2", thread_id: "t1", note: "Email sent." });
+
+    const sendCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/messages/send"));
+    const payload = JSON.parse(String(sendCall![1].body));
+    expect(payload.threadId).toBe("t1");
+    const mime = Buffer.from(payload.raw, "base64url").toString("utf8");
+    expect(mime).toContain("To: alice@example.com");
+    expect(mime).toContain("In-Reply-To: <orig@example.com>");
+    expect(mime).toContain("References: <root@example.com> <orig@example.com>");
   });
 
   it("surfaces auth problems as a tool error result instead of throwing", async () => {
