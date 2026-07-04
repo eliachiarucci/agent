@@ -31,6 +31,8 @@ export const MEMORY_EXTRACTION_SYSTEM_PROMPT = [
   "",
   "Rules:",
   '- Phrase every memory in the third person and name the person it is about (e.g. "Elia prefers tea over coffee"), and set the subject field accordingly — never "the user", "I", or "my".',
+  '- Be sure that the user likes something before storing a preference, saying "I need this" is different than saying "I like this".',
+  "- If the user talks about work or a project, there is no need to store all the specifics, which might be outdated in a few days; just store a general level overview.",
   "- Before storing, use recallMemories to check whether the fact already exists. If it changed or was wrong, call updateMemory; if it is already stored, leave it; only call remember for genuinely new facts.",
   "- If an exchange contains nothing worth remembering, do nothing.",
   "- You run unattended and the user never sees your replies. Do not ask questions or address them; just operate the tools.",
