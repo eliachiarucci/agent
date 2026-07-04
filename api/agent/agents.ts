@@ -62,13 +62,26 @@ const updateSchema = z
         // resets to the env-configured default model).
         memory_provider: z.enum(PROVIDER_TYPES).nullable().optional(),
         memory_model: z.string().min(1).nullable().optional(),
+        // The chat model's memory surface (prompt section + tools + recall):
+        // on/off, and an optional replacement for the built-in instructions
+        // (null/empty resets to the default).
+        chat_memory_enabled: z.boolean().optional(),
+        chat_memory_prompt: z.string().nullable().optional(),
+        // The background extraction "second pass": on/off, and an optional
+        // replacement for its system prompt (null/empty resets to the default).
+        memory_extraction_enabled: z.boolean().optional(),
+        memory_extraction_prompt: z.string().nullable().optional(),
     })
     .refine(
         (d) =>
             d.name !== undefined ||
             d.system_prompt !== undefined ||
             d.memory_provider !== undefined ||
-            d.memory_model !== undefined,
+            d.memory_model !== undefined ||
+            d.chat_memory_enabled !== undefined ||
+            d.chat_memory_prompt !== undefined ||
+            d.memory_extraction_enabled !== undefined ||
+            d.memory_extraction_prompt !== undefined,
         { message: "Nothing to update" }
     );
 
@@ -95,13 +108,32 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { name, system_prompt, memory_provider, memory_model } = parsed.data;
+    const {
+        name,
+        system_prompt,
+        memory_provider,
+        memory_model,
+        chat_memory_enabled,
+        chat_memory_prompt,
+        memory_extraction_enabled,
+        memory_extraction_prompt,
+    } = parsed.data;
     res.json(
         await updateAgent(agent.id, {
             ...(name !== undefined && { name }),
             ...(system_prompt !== undefined && { systemPrompt: system_prompt?.trim() || null }),
             ...(memory_provider !== undefined && { memoryProvider: memory_provider }),
             ...(memory_model !== undefined && { memoryModel: memory_model }),
+            ...(chat_memory_enabled !== undefined && { chatMemoryEnabled: chat_memory_enabled }),
+            ...(chat_memory_prompt !== undefined && {
+                chatMemoryPrompt: chat_memory_prompt?.trim() || null,
+            }),
+            ...(memory_extraction_enabled !== undefined && {
+                memoryExtractionEnabled: memory_extraction_enabled,
+            }),
+            ...(memory_extraction_prompt !== undefined && {
+                memoryExtractionPrompt: memory_extraction_prompt?.trim() || null,
+            }),
         })
     );
 }

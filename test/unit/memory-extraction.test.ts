@@ -33,7 +33,11 @@ vi.mock("../../lib/agent/context", () => ({
   getContextWindow: vi.fn(async () => ({ model: "test", contextLength: 32768 })),
 }));
 
-import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
+import {
+  MEMORY_EXTRACTION_SYSTEM_PROMPT,
+  runMemoryExtraction,
+} from "../../lib/agent/memory-extraction";
+import { updateAgent } from "../../lib/db/agents";
 import { getMemoryConversation } from "../../lib/db/memory-conversations";
 import { createMessage } from "../../lib/db/conversations";
 import { upsertProviderSetting } from "../../lib/db/provider-settings";
@@ -150,5 +154,54 @@ describe("memory extraction serialization", () => {
     // The failed turn stored nothing; the next turn still ran and saved.
     const stored = await getMemoryConversation(conv.id);
     expect(exchangesOf(stored!.messages)).toEqual(["Elia: two\n\nAssistant: re:two"]);
+  });
+});
+
+describe("memory extraction settings", () => {
+  it("skips the turn entirely when the agent's second pass is disabled", async () => {
+    const { agent, conv, scope } = await setupConversation();
+    await updateAgent(agent.id, { memoryExtractionEnabled: false });
+
+    await runMemoryExtraction({ conversationId: conv.id, scope, messages: turn("one") });
+
+    expect(h.generateText).not.toHaveBeenCalled();
+    expect(await getMemoryConversation(conv.id)).toBeUndefined();
+  });
+
+  it("skips the turn when the conversation opted out of memory", async () => {
+    const { user, agent, scope } = await setupConversation();
+    const conv = await createMessage({
+      agentId: agent.id,
+      userId: user.id,
+      shared: false,
+      memory: false,
+      messages: [],
+    });
+
+    await runMemoryExtraction({ conversationId: conv.id, scope, messages: turn("one") });
+
+    expect(h.generateText).not.toHaveBeenCalled();
+    expect(await getMemoryConversation(conv.id)).toBeUndefined();
+  });
+
+  it("uses the agent's custom prompt, falling back to the built-in one", async () => {
+    const { agent, conv, scope } = await setupConversation();
+
+    const p1 = runMemoryExtraction({ conversationId: conv.id, scope, messages: turn("one") });
+    await vi.waitFor(() => expect(h.generateText).toHaveBeenCalledTimes(1));
+    releaseNext();
+    await p1;
+    expect(h.generateText.mock.calls[0][0]).toMatchObject({
+      system: MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    });
+
+    await updateAgent(agent.id, { memoryExtractionPrompt: "Only remember birthdays." });
+    const p2 = runMemoryExtraction({ conversationId: conv.id, scope, messages: turn("two") });
+    await vi.waitFor(() => expect(h.generateText).toHaveBeenCalledTimes(2));
+    releaseNext();
+    await p2;
+    expect(h.generateText.mock.calls[1][0]).toMatchObject({
+      system: "Only remember birthdays.",
+    });
   });
 });

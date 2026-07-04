@@ -52,6 +52,7 @@ import {
     buildConversationSearchTools,
     conversationSearchPrompt,
 } from "../../lib/agent/conversation-search";
+import { buildConnectorTools } from "../../lib/agent/connectors";
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
@@ -136,6 +137,9 @@ const bodySchema = z
         agent_id: z.uuid().optional(),
         // Only honored when the conversation is created; existing ones keep their flag.
         shared: z.boolean().optional(),
+        // Like `shared`: whether memory applies to this conversation (recall,
+        // memory tools, background extraction). Only honored at creation.
+        memory: z.boolean().optional(),
         attachments: z.array(attachmentSchema).max(20).optional(),
         // The model selected in the UI. Resolved against the *sender's* provider
         // settings; omitted → the env-configured default model.
@@ -156,8 +160,17 @@ export const POST: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { message, conversation_id, agent_id, shared, attachments, provider, model, timezone } =
-        parsed.data;
+    const {
+        message,
+        conversation_id,
+        agent_id,
+        shared,
+        memory,
+        attachments,
+        provider,
+        model,
+        timezone,
+    } = parsed.data;
 
     const user = await getSessionUser(req);
     if (!user) {
@@ -226,6 +239,11 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     const conversationShared = existing ? existing.shared : shared ?? false;
+    // Per-conversation memory opt-out on top of the agent-level switches: off →
+    // no recalled memories, no memory prompt/tools for the chat model, and the
+    // background extractor skips the conversation (checked in extractTurn).
+    const conversationMemory = existing ? existing.memory : memory ?? true;
+    const memoryEnabled = agent.chatMemoryEnabled && conversationMemory;
     const scope: MemoryScope = {
         agentId,
         speaker: { id: user.id, name: user.name },
@@ -237,10 +255,20 @@ export const POST: express.RequestHandler = async (req, res) => {
     // Retrieved memories ride along with the user message instead of the system
     // prompt: everything before this point in the prompt is then byte-identical to
     // the previous request, so the server's KV cache stays valid across turns.
+    // Owners can switch the chat model's whole memory surface off per agent
+    // (Settings → Memories): no memory prompt, no recalled memories, no memory
+    // tools. Background extraction is governed separately (memoryExtractionEnabled).
     const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
         loadSystemPrompt(),
-        buildRelevantMemoriesBlock(scope, buildRetrievalQuery(history, message)),
-        buildMemorySystemPrompt(scope, { sharedConversation: conversationShared }),
+        memoryEnabled
+            ? buildRelevantMemoriesBlock(scope, buildRetrievalQuery(history, message))
+            : null,
+        memoryEnabled
+            ? buildMemorySystemPrompt(scope, {
+                  sharedConversation: conversationShared,
+                  customPrompt: agent.chatMemoryPrompt,
+              })
+            : "",
     ]);
 
     // Attached files ride along as a machine text part (parsed by the UI into
@@ -275,6 +303,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             agentId,
             userId: user.id,
             shared: conversationShared,
+            memory: conversationMemory,
             messages: history,
         });
         conversationId = created.id;
@@ -298,6 +327,17 @@ export const POST: express.RequestHandler = async (req, res) => {
         model,
     };
 
+    // Connector tools (Settings → Tools) are per sender and per model: only
+    // connected connectors, filtered by the model-scoped permission toggles.
+    // Stable for a given user+model, so the prompt prefix stays KV-cache friendly.
+    const connectorToolset = contextTarget
+        ? await buildConnectorTools({
+              userId: user.id,
+              provider: contextTarget.provider,
+              model: contextTarget.model,
+          })
+        : { tools: {}, prompt: "" };
+
     const system = [
         basePrompt,
         agentPrompt,
@@ -307,6 +347,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         filesPrompt,
         notesPrompt,
         conversationSearchPrompt,
+        connectorToolset.prompt,
         buildCronToolsPrompt(cronScope.timezone),
     ]
         .filter(Boolean)
@@ -314,7 +355,7 @@ export const POST: express.RequestHandler = async (req, res) => {
     // File tools are pinned to this conversation's folder (one folder per
     // conversation); note tools to the agent's shared notes.
     const tools = {
-        ...buildMemoryTools(scope),
+        ...(memoryEnabled ? buildMemoryTools(scope) : {}),
         ...searchTools,
         ...buildDateTools(cronScope.timezone),
         ...buildFileTools(conversationId),
@@ -325,6 +366,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             viewerId: user.id,
             currentConversationId: conversationId,
         }),
+        ...connectorToolset.tools,
     };
 
     // If the conversation was previously compacted, the model sees the stored

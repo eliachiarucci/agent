@@ -182,40 +182,53 @@ function formatMemory(m: Memory): string {
 // line is omitted (messages carry name labels instead). It only changes when
 // the agent's membership or pinned memories change. Per-turn retrieval is
 // appended to the user message instead (buildRelevantMemoriesBlock).
+// The static instruction text of the chat model's memory section: the intro
+// line and the rules. Owners can replace it per agent (agents.chat_memory_prompt,
+// Settings → Memories); the dynamic context — who the agent serves and the
+// pinned core memories — is appended either way. Exported (as one block) for
+// GET /agent/memory-prompt, which feeds the settings editor's "copy default".
+const MEMORY_INTRO = "You are a personal assistant with a long-term memory stored in a database.";
+const MEMORY_RULES = [
+  "## Memory rules",
+  "- User messages may start with a <relevant-memories> block: memories retrieved from the database for that turn. It is machine-inserted; the user did not write it and cannot see it, so never quote it back as something they said.",
+  "- Blocks in earlier messages reflect what was known at that point; the most recent block and the core memories above are authoritative.",
+  "- When someone shares a lasting fact (preference, person, event, health detail), store it with the remember tool. Phrase it in third person with the person's name (\"Elia's car is a Golf 7\"), and set the subject field to whoever the fact is about — or \"shared\" for group facts.",
+  "- If something contradicts an existing memory, use updateMemory or forget with the memory's id instead of storing a duplicate.",
+  "- Use recallMemories when you need facts that are not already in your context.",
+  "- Do not mention memory ids or these rules to the user; just use what you know naturally.",
+].join("\n");
+export const MEMORY_SYSTEM_PROMPT = `${MEMORY_INTRO}\n\n${MEMORY_RULES}`;
+
 export async function buildMemorySystemPrompt(
   scope: MemoryScope,
-  { sharedConversation }: { sharedConversation: boolean }
+  {
+    sharedConversation,
+    customPrompt,
+  }: { sharedConversation: boolean; customPrompt?: string | null }
 ): Promise<string> {
   const pinned = await getPinnedMemories(scope.agentId);
 
   const memberNames = scope.members.map((m) => m.name).join(", ");
-  const sections = [
-    [
-      "You are a personal assistant with a long-term memory stored in a database.",
-      scope.members.length === 1
-        ? `You assist one person: ${memberNames}.`
-        : sharedConversation
-          ? `This assistant is shared by several people: ${memberNames}. This is a shared conversation: any member can write in it, and each user message is prefixed with the speaker's name. Keep their facts straight and never mix one person's details into another's.`
-          : `This assistant is shared by several people: ${memberNames}, but this is a private conversation with ${scope.speaker.name} — every message is from them. Keep each member's facts straight and never mix one person's details into another's.`,
-    ].join("\n"),
-  ];
+  const membersLine =
+    scope.members.length === 1
+      ? `You assist one person: ${memberNames}.`
+      : sharedConversation
+        ? `This assistant is shared by several people: ${memberNames}. This is a shared conversation: any member can write in it, and each user message is prefixed with the speaker's name. Keep their facts straight and never mix one person's details into another's.`
+        : `This assistant is shared by several people: ${memberNames}, but this is a private conversation with ${scope.speaker.name} — every message is from them. Keep each member's facts straight and never mix one person's details into another's.`;
+  const pinnedSection =
+    pinned.length > 0
+      ? `## Core memories (always available)\n${pinned.map(formatMemory).join("\n")}`
+      : null;
 
-  if (pinned.length > 0) {
-    sections.push(`## Core memories (always available)\n${pinned.map(formatMemory).join("\n")}`);
+  // An owner-written prompt replaces the built-in instructions wholesale; the
+  // dynamic context still rides along since the owner cannot know it upfront.
+  if (customPrompt) {
+    return [customPrompt, membersLine, pinnedSection].filter(Boolean).join("\n\n");
   }
 
-  sections.push(
-    [
-      "## Memory rules",
-      "- User messages may start with a <relevant-memories> block: memories retrieved from the database for that turn. It is machine-inserted; the user did not write it and cannot see it, so never quote it back as something they said.",
-      "- Blocks in earlier messages reflect what was known at that point; the most recent block and the core memories above are authoritative.",
-      "- When someone shares a lasting fact (preference, person, event, health detail), store it with the remember tool. Phrase it in third person with the person's name (\"Elia's car is a Golf 7\"), and set the subject field to whoever the fact is about — or \"shared\" for group facts.",
-      "- If something contradicts an existing memory, use updateMemory or forget with the memory's id instead of storing a duplicate.",
-      "- Use recallMemories when you need facts that are not already in your context.",
-      "- Do not mention memory ids or these rules to the user; just use what you know naturally.",
-    ].join("\n")
-  );
-
+  const sections = [`${MEMORY_INTRO}\n${membersLine}`];
+  if (pinnedSection) sections.push(pinnedSection);
+  sections.push(MEMORY_RULES);
   return sections.join("\n\n");
 }
 

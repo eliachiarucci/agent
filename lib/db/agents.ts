@@ -39,6 +39,12 @@ export async function updateAgent(
     // Set together (or both null to reset to the env default).
     memoryProvider?: ProviderType | null;
     memoryModel?: string | null;
+    chatMemoryEnabled?: boolean;
+    // null → the built-in memory instructions.
+    chatMemoryPrompt?: string | null;
+    memoryExtractionEnabled?: boolean;
+    // null → the built-in extraction prompt.
+    memoryExtractionPrompt?: string | null;
   }
 ): Promise<Agent | undefined> {
   const [row] = await db.update(agents).set(changes).where(eq(agents.id, id)).returning();

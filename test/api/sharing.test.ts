@@ -97,6 +97,22 @@ describe("conversation visibility over HTTP", () => {
     );
   });
 
+  it("carries the per-conversation memory flag (default on)", async () => {
+    const { owner, ownerUser, agentId } = await sharedAgentScenario();
+    const withMemory = await seedConversation(agentId, ownerUser, false);
+    const withoutMemory = await createMessage({
+      agentId,
+      userId: ownerUser.id,
+      shared: false,
+      memory: false,
+      messages: [],
+    });
+
+    const list = (await owner.get(`/agent/conversation?agent_id=${agentId}`)).body;
+    expect(list.find((c: any) => c.id === withMemory.id)?.memory).toBe(true);
+    expect(list.find((c: any) => c.id === withoutMemory.id)?.memory).toBe(false);
+  });
+
   it("chatting in someone else's private conversation is forbidden", async () => {
     const { member, ownerUser, agentId } = await sharedAgentScenario();
     const ownerPrivate = await seedConversation(agentId, ownerUser, false);

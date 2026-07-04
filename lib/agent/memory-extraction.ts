@@ -11,6 +11,7 @@ import { resolveDefaultChatModelAndTarget } from "./default-model";
 import { getAgent, type Agent } from "../db/agents";
 import { getProviderSetting } from "../db/provider-settings";
 import { buildMemoryTools, type MemoryScope } from "./memory";
+import { findMessage } from "../db/conversations";
 import { getMemoryConversation, saveMemoryConversation } from "../db/memory-conversations";
 import { ATTACHED_FILES_MARKER } from "./files";
 import { compactMemoryLog, usageTokens } from "./compaction";
@@ -137,8 +138,13 @@ async function extractTurn(params: ExtractionParams): Promise<void> {
 
   // The extractor runs on the agent's configured memory model (owner-picked in
   // settings), independent of whatever provider/model the turn itself used.
-  const agent = await getAgent(scope.agentId);
-  if (!agent) return;
+  // Owners can switch the second pass off per agent (Settings → Memories), and
+  // creators can opt a single conversation out of memory entirely.
+  const [agent, conversation] = await Promise.all([
+    getAgent(scope.agentId),
+    findMessage(conversationId),
+  ]);
+  if (!agent || !agent.memoryExtractionEnabled || !conversation?.memory) return;
 
   const prior = (await getMemoryConversation(conversationId))?.messages ?? [];
   const history: ModelMessage[] = [...prior, { role: "user", content: exchange }];
@@ -151,7 +157,7 @@ async function extractTurn(params: ExtractionParams): Promise<void> {
       model: memoryModel,
       middleware: extractReasoningMiddleware({ tagName: "think" }),
     }),
-    system: MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    system: agent.memoryExtractionPrompt ?? MEMORY_EXTRACTION_SYSTEM_PROMPT,
     messages: history,
     // Only the memory tools — the extractor reads and writes memory, nothing else.
     tools: buildMemoryTools(scope),

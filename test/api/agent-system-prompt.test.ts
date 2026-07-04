@@ -99,6 +99,99 @@ describe("agent system prompt", () => {
     expect(cleared.body.memoryModel).toBeNull();
   });
 
+  it("lets the owner toggle the extraction second pass and override its prompt", async () => {
+    const owner = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const fresh = (await owner.get("/agent/agents")).body[0];
+    // Fresh agents extract with the built-in prompt.
+    expect(fresh.memoryExtractionEnabled).toBe(true);
+    expect(fresh.memoryExtractionPrompt).toBeNull();
+
+    const set = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      memory_extraction_enabled: false,
+      memory_extraction_prompt: "Only remember birthdays.",
+    });
+    expect(set.status).toBe(200);
+    expect(set.body.memoryExtractionEnabled).toBe(false);
+    expect(set.body.memoryExtractionPrompt).toBe("Only remember birthdays.");
+
+    // The list endpoint carries both so the settings tab can populate.
+    const listed = (await owner.get("/agent/agents")).body[0];
+    expect(listed.memoryExtractionEnabled).toBe(false);
+    expect(listed.memoryExtractionPrompt).toBe("Only remember birthdays.");
+
+    // Whitespace-only clears the override back to the built-in prompt.
+    const cleared = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      memory_extraction_enabled: true,
+      memory_extraction_prompt: "  ",
+    });
+    expect(cleared.body.memoryExtractionEnabled).toBe(true);
+    expect(cleared.body.memoryExtractionPrompt).toBeNull();
+  });
+
+  it("rejects extraction settings from non-owners", async () => {
+    const owner = new TestClient(BASE);
+    const member = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const memberUser = await signUp(member, "Member");
+
+    const agentId: string = (await owner.get("/agent/agents")).body[0].id;
+    await owner.post("/agent/members", { agent_id: agentId, member_id: memberUser.id });
+
+    const fromMember = await member.patch("/agent/agents", {
+      id: agentId,
+      memory_extraction_enabled: false,
+    });
+    expect(fromMember.status).toBe(403);
+  });
+
+  it("lets the owner toggle chat memory and override its prompt", async () => {
+    const owner = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const fresh = (await owner.get("/agent/agents")).body[0];
+    // Fresh agents chat with the built-in memory surface.
+    expect(fresh.chatMemoryEnabled).toBe(true);
+    expect(fresh.chatMemoryPrompt).toBeNull();
+
+    const set = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      chat_memory_enabled: false,
+      chat_memory_prompt: "Only ever talk about memories in haiku.",
+    });
+    expect(set.status).toBe(200);
+    expect(set.body.chatMemoryEnabled).toBe(false);
+    expect(set.body.chatMemoryPrompt).toBe("Only ever talk about memories in haiku.");
+
+    // The list endpoint carries both so the settings tab can populate.
+    const listed = (await owner.get("/agent/agents")).body[0];
+    expect(listed.chatMemoryEnabled).toBe(false);
+    expect(listed.chatMemoryPrompt).toBe("Only ever talk about memories in haiku.");
+
+    // Whitespace-only clears the override back to the built-in instructions.
+    const cleared = await owner.patch("/agent/agents", {
+      id: fresh.id,
+      chat_memory_enabled: true,
+      chat_memory_prompt: "  ",
+    });
+    expect(cleared.body.chatMemoryEnabled).toBe(true);
+    expect(cleared.body.chatMemoryPrompt).toBeNull();
+  });
+
+  it("serves the built-in memory prompts to signed-in users only", async () => {
+    const anon = new TestClient(BASE);
+    expect((await anon.get("/agent/memory-prompt")).status).toBe(401);
+
+    const owner = new TestClient(BASE);
+    await signUp(owner, "Owner");
+    const res = await owner.get("/agent/memory-prompt");
+    expect(res.status).toBe(200);
+    // Spot-check they are the real prompts, not placeholders.
+    expect(res.body.chat).toContain("## Memory rules");
+    expect(res.body.extraction).toContain("long-term memory");
+  });
+
   it("rejects an unknown memory provider", async () => {
     const owner = new TestClient(BASE);
     await signUp(owner, "Owner");

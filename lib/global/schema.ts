@@ -144,6 +144,18 @@ export const agents = pgTable("agents", {
   // settings like a chat request. NULL → the env-configured default model.
   memoryProvider: text("memory_provider").$type<ProviderType>(),
   memoryModel: text("memory_model"),
+  // The chat model's memory surface (memory system-prompt section, memory
+  // tools, per-turn recalled memories) can be turned off per agent, and its
+  // built-in instructions replaced (NULL → MEMORY_SYSTEM_PROMPT in
+  // lib/agent/memory.ts; the members line and pinned memories always apply).
+  chatMemoryEnabled: boolean("chat_memory_enabled").notNull().default(true),
+  chatMemoryPrompt: text("chat_memory_prompt"),
+  // The background extraction "second pass" can be turned off per agent; the
+  // chat model's own memory tools keep working either way.
+  memoryExtractionEnabled: boolean("memory_extraction_enabled").notNull().default(true),
+  // Owner-written replacement for MEMORY_EXTRACTION_SYSTEM_PROMPT. NULL → the
+  // built-in default (lib/agent/memory-extraction.ts).
+  memoryExtractionPrompt: text("memory_extraction_prompt"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -181,6 +193,10 @@ export const conversations = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     shared: boolean("shared").notNull().default(false),
+    // Whether the agent's memory applies to this conversation (recalled
+    // memories, memory prompt/tools, background extraction). Like `shared`,
+    // fixed at creation.
+    memory: boolean("memory").notNull().default(true),
     messages: jsonb("messages").notNull().$type<StoredMessage[]>(),
     // Plaintext of the conversation's user/assistant messages (machine-inserted
     // blocks like <relevant-memories> stripped), maintained on every write by the
@@ -273,6 +289,79 @@ export const userSettings = pgTable("user_settings", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
+
+// ── Connectors ───────────────────────────────────────────────────────────────
+// External service integrations (Google-style OAuth apps the agent gets tools
+// from). Each user connects their own account: the OAuth client credentials and
+// the resulting tokens are both per (user, connector).
+
+export const CONNECTOR_TYPES = ["gmail"] as const;
+export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
+
+// The user's own OAuth client (created in their Google Cloud project). Stored
+// like provider API keys: plaintext JSONB, masked at the API boundary.
+export type ConnectorSettingsValue = {
+  clientId?: string;
+  clientSecret?: string;
+};
+
+// Tokens from the OAuth exchange. `accessTokenExpiresAt` is epoch ms; the
+// access token is refreshed server-side when it is near expiry
+// (lib/agent/connectors/google-auth.ts). `email` identifies the connected
+// account in the UI (decoded from the id_token).
+export type ConnectorTokens = {
+  refreshToken: string;
+  accessToken: string;
+  accessTokenExpiresAt: number;
+  scopes: string[];
+  email?: string;
+};
+
+// "error" = a refresh failed with invalid_grant (token revoked or expired):
+// tools are withheld and the UI offers a reconnect.
+export const CONNECTOR_STATUSES = ["disconnected", "connected", "error"] as const;
+export type ConnectorStatus = (typeof CONNECTOR_STATUSES)[number];
+
+export const connectorSettings = pgTable(
+  "connector_settings",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    connector: text("connector").$type<ConnectorType>().notNull(),
+    settings: jsonb("settings").notNull().$type<ConnectorSettingsValue>(),
+    tokens: jsonb("tokens").$type<ConnectorTokens | null>(),
+    status: text("status").$type<ConnectorStatus>().notNull().default("disconnected"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("connector_settings_user_connector_idx").on(t.userId, t.connector)]
+);
+
+// Per-tool switches for connector tools, scoped to a chat model: the Tools
+// settings tab picks a provider+model and toggles individual tools for it.
+// Shape: { [connector]: { [toolName]: enabled } }. A missing connector/tool key
+// means enabled — only explicit `false` withholds a tool.
+export type ToolPermissionsValue = Partial<Record<ConnectorType, Record<string, boolean>>>;
+
+export const toolPermissions = pgTable(
+  "tool_permissions",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<ProviderType>().notNull(),
+    model: text("model").notNull(),
+    permissions: jsonb("permissions").notNull().$type<ToolPermissionsValue>(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tool_permissions_user_provider_model_idx").on(t.userId, t.provider, t.model),
+  ]
+);
 
 // "once" jobs (reminders) are deleted after their first successful run.
 export const CRON_RECURRENCES = ["once", "weekly", "biweekly", "monthly"] as const;

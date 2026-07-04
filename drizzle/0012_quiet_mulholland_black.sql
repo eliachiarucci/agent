@@ -1,0 +1,1 @@
+ALTER TABLE "conversations" ADD COLUMN "memory" boolean DEFAULT true NOT NULL;

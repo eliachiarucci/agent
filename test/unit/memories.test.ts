@@ -19,7 +19,12 @@ import {
   searchMemories,
   updateMemory,
 } from "../../lib/db/memories";
-import { buildMemoryTools, type MemoryScope } from "../../lib/agent/memory";
+import {
+  buildMemorySystemPrompt,
+  buildMemoryTools,
+  MEMORY_SYSTEM_PROMPT,
+  type MemoryScope,
+} from "../../lib/agent/memory";
 import { fakeEmbedding } from "../helpers/embeddings";
 import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
 
@@ -236,6 +241,58 @@ describe("remember tool duplicate guard", () => {
 
     expect(result.stored).toBe("Alice's favourite food is carbonara");
     expect(await findMemories(agent.id)).toHaveLength(2);
+  });
+});
+
+describe("buildMemorySystemPrompt custom prompt", () => {
+  async function promptScenario() {
+    const { user, agent } = await makeUserWithAgent("Alice");
+    await createMemory({
+      agentId: agent.id,
+      content: "Alice is vegetarian",
+      importance: 0.9,
+      category: "food",
+      pinned: true,
+    });
+    const scope: MemoryScope = {
+      agentId: agent.id,
+      speaker: { id: user.id, name: user.name },
+      members: [{ userId: user.id, name: user.name, role: "owner" }],
+    };
+    return scope;
+  }
+
+  it("assembles the built-in instructions with members and pinned memories", async () => {
+    const scope = await promptScenario();
+    const prompt = await buildMemorySystemPrompt(scope, { sharedConversation: false });
+
+    expect(prompt).toContain("You assist one person: Alice.");
+    expect(prompt).toContain("Alice is vegetarian");
+    expect(prompt).toContain("## Memory rules");
+  });
+
+  it("replaces the instructions with the custom prompt but keeps the dynamic context", async () => {
+    const scope = await promptScenario();
+    const prompt = await buildMemorySystemPrompt(scope, {
+      sharedConversation: false,
+      customPrompt: "Only ever talk about memories in haiku.",
+    });
+
+    expect(prompt.startsWith("Only ever talk about memories in haiku.")).toBe(true);
+    // Members line and pinned memories still ride along; the built-in rules don't.
+    expect(prompt).toContain("You assist one person: Alice.");
+    expect(prompt).toContain("Alice is vegetarian");
+    expect(prompt).not.toContain("## Memory rules");
+  });
+
+  it("exports the copyable default as exactly the instruction text", async () => {
+    const scope = await promptScenario();
+    const prompt = await buildMemorySystemPrompt(scope, { sharedConversation: false });
+    // The endpoint-served default is the built prompt minus the dynamic parts,
+    // so pasting it back as a custom prompt reproduces the built-in behaviour.
+    const [intro, rules] = MEMORY_SYSTEM_PROMPT.split("\n\n");
+    expect(prompt).toContain(intro);
+    expect(prompt).toContain(rules);
   });
 });
 
