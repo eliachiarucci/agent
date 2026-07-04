@@ -369,6 +369,38 @@ export const toolPermissions = pgTable(
   (t) => [uniqueIndex("tool_permissions_user_agent_idx").on(t.userId, t.agentId)]
 );
 
+// Standing approvals for "ask"-level tools: when the user picks "always
+// approve" on an approval prompt, the (connector, tool, target) combination is
+// recorded here and future calls matching it run without asking. `target` is
+// derived server-side from the pending call's input (e.g. create_draft → each
+// recipient email, one row per recipient); "*" covers the whole tool for tools
+// with no target concept. Managed in Settings → Tools → approval overrides.
+export const toolApprovals = pgTable(
+  "tool_approvals",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    connector: text("connector").$type<ConnectorType>().notNull(),
+    tool: text("tool").notNull(),
+    target: text("target").notNull().default("*"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tool_approvals_combination_idx").on(
+      t.userId,
+      t.agentId,
+      t.connector,
+      t.tool,
+      t.target
+    ),
+  ]
+);
+
 // "once" jobs (reminders) are deleted after their first successful run.
 export const CRON_RECURRENCES = ["once", "weekly", "biweekly", "monthly"] as const;
 export type CronRecurrence = (typeof CRON_RECURRENCES)[number];

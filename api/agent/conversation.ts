@@ -52,7 +52,17 @@ import {
     buildConversationSearchTools,
     conversationSearchPrompt,
 } from "../../lib/agent/conversation-search";
-import { buildConnectorTools } from "../../lib/agent/connectors";
+import {
+    buildConnectorTools,
+    connectorApprovalTargets,
+    connectorForTool,
+} from "../../lib/agent/connectors";
+import {
+    applyApprovalResponses,
+    denyUnansweredApprovals,
+    pendingApprovalParts,
+} from "../../lib/agent/tool-approval";
+import { addToolApprovals } from "../../lib/db/tool-approvals";
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import type { StoredMessage } from "../../lib/global/schema";
@@ -127,9 +137,18 @@ const attachmentSchema = z.object({
     label: z.string().min(1).max(200),
 });
 
+// The user's decision on one pending approval prompt ("ask"-level tool call).
+// `always` additionally stores a standing (tool, target) approval override.
+const approvalResponseSchema = z.object({
+    approval_id: z.string().min(1).max(200),
+    approved: z.boolean(),
+    always: z.boolean().optional(),
+});
+
 // The user comes from the session cookie; agent_id defaults to their oldest agent.
-// A turn must carry text or at least one attachment (message may be empty when
-// the user only attaches files).
+// A turn either carries text/attachments (a normal message) or tool_approvals
+// (decisions on pending approval prompts, which resume the paused turn) — never
+// both: approvals resume the model mid-turn, so a new user message can't ride along.
 const bodySchema = z
     .object({
         message: z.string().default(""),
@@ -141,6 +160,7 @@ const bodySchema = z
         // memory tools, background extraction). Only honored at creation.
         memory: z.boolean().optional(),
         attachments: z.array(attachmentSchema).max(20).optional(),
+        tool_approvals: z.array(approvalResponseSchema).min(1).max(20).optional(),
         // The model selected in the UI. Resolved against the *sender's* provider
         // settings; omitted → the env-configured default model.
         provider: z.enum(PROVIDER_TYPES).optional(),
@@ -149,9 +169,13 @@ const bodySchema = z
         // Omitted → the server's timezone.
         timezone: z.string().min(1).optional(),
     })
-    .refine((d) => d.message.trim().length > 0 || (d.attachments?.length ?? 0) > 0, {
-        message: "message or attachments required",
-    });
+    .refine(
+        (d) =>
+            d.tool_approvals
+                ? d.message.trim().length === 0 && (d.attachments?.length ?? 0) === 0
+                : d.message.trim().length > 0 || (d.attachments?.length ?? 0) > 0,
+        { message: "message/attachments or tool_approvals required (not both)" }
+    );
 
 export const POST: express.RequestHandler = async (req, res) => {
     const parsed = bodySchema.safeParse(req.body);
@@ -167,6 +191,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         shared,
         memory,
         attachments,
+        tool_approvals,
         provider,
         model,
         timezone,
@@ -206,6 +231,41 @@ export const POST: express.RequestHandler = async (req, res) => {
     if (!isMember || (existing && !canAccessConversation(existing, user.id, isMember))) {
         res.status(403).json({ error: "Not allowed to access this conversation" });
         return;
+    }
+
+    const history: UIMessage[] = existing ? toUIMessages(existing.messages ?? []) : [];
+
+    // Approval decisions are validated before model resolution (a decision on a
+    // gone conversation is a 404 even with no model configured) but applied
+    // after it, so a bad model selection never persists a half-resumed turn.
+    if (tool_approvals) {
+        // No new user message — the paused turn resumes instead. The pending
+        // call runs with the original sender's connector credentials, so only
+        // they may decide.
+        if (!existing) {
+            res.status(404).json({ error: "Conversation not found" });
+            return;
+        }
+        const turnSender = [...history].reverse().find((m) => m.role === "user");
+        const senderId =
+            (turnSender?.metadata as UserMessageMetadata | undefined)?.userId ?? existing.userId;
+        if (senderId !== user.id) {
+            res.status(403).json({ error: "Only the sender of this turn can respond" });
+            return;
+        }
+        // All prompts of the paused turn must be decided at once: a partial
+        // response would leave dangling tool calls the model can't resume over.
+        const pending = pendingApprovalParts(history.at(-1));
+        const responded = new Set(tool_approvals.map((a) => a.approval_id));
+        if (
+            pending.length === 0 ||
+            !pending.every(
+                (p) => p.state === "approval-requested" && responded.has(p.approval.id)
+            )
+        ) {
+            res.status(400).json({ error: "tool_approvals must answer every pending approval" });
+            return;
+        }
     }
 
     // Resolve the model only after access is granted (so a forbidden request is a
@@ -250,17 +310,16 @@ export const POST: express.RequestHandler = async (req, res) => {
         members,
     };
 
-    const history: UIMessage[] = existing ? toUIMessages(existing.messages ?? []) : [];
-
     // Retrieved memories ride along with the user message instead of the system
     // prompt: everything before this point in the prompt is then byte-identical to
     // the previous request, so the server's KV cache stays valid across turns.
     // Owners can switch the chat model's whole memory surface off per agent
     // (Settings → Memories): no memory prompt, no recalled memories, no memory
     // tools. Background extraction is governed separately (memoryExtractionEnabled).
+    // Approval turns append no user message, so they retrieve nothing.
     const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
         loadSystemPrompt(),
-        memoryEnabled
+        memoryEnabled && !tool_approvals
             ? buildRelevantMemoriesBlock(scope, buildRetrievalQuery(history, message))
             : null,
         memoryEnabled
@@ -271,42 +330,78 @@ export const POST: express.RequestHandler = async (req, res) => {
             : "",
     ]);
 
-    // Attached files ride along as a machine text part (parsed by the UI into
-    // chips, read by the model via readFile) — stored so reloads and later turns
-    // see the same attachments. The literal must match the UI's ATTACHMENTS_MARKER.
-    const attachmentsBlock =
-        attachments && attachments.length > 0
-            ? ATTACHED_FILES_MARKER + JSON.stringify(attachments)
-            : "";
-
-    history.push({
-        id: crypto.randomUUID(),
-        role: "user",
-        metadata: { userId: user.id, userName: user.name } satisfies UserMessageMetadata,
-        parts: [
-            ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
-            ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
-            ...(attachmentsBlock ? [{ type: "text" as const, text: attachmentsBlock }] : []),
-        ],
-    });
-
-    // Persist before streaming so the conversation (with the user's message)
-    // survives a reload or chat switch mid-stream; onFinish then overwrites
-    // messages with the completed turn.
     let conversationId: string;
-    if (existing) {
+    if (tool_approvals && existing) {
+        const outcome = applyApprovalResponses(
+            history,
+            tool_approvals.map((a) => ({
+                approvalId: a.approval_id,
+                approved: a.approved,
+                always: a.always,
+            }))
+        );
+        if ("error" in outcome) {
+            res.status(400).json({ error: outcome.error });
+            return;
+        }
+        // "Always approve": store the standing (tool, target) overrides. The
+        // target comes from the pending call's input, derived server-side.
+        for (const { toolName, input, response } of outcome.applied) {
+            if (!response.approved || !response.always) continue;
+            const connector = connectorForTool(toolName);
+            if (!connector) continue;
+            await addToolApprovals({
+                userId: user.id,
+                agentId,
+                connector,
+                tool: toolName,
+                targets: connectorApprovalTargets(connector, toolName, input),
+            });
+        }
         await updateMessage(existing.id, { messages: history });
         conversationId = existing.id;
     } else {
-        const created = await createMessage({
-            id: conversation_id,
-            agentId,
-            userId: user.id,
-            shared: conversationShared,
-            memory: conversationMemory,
-            messages: history,
+        // A user message while approval prompts are still pending denies them:
+        // the dangling calls become denied tool results so the model's view of
+        // the turn stays coherent.
+        denyUnansweredApprovals(history, "The user sent a new message instead of responding.");
+
+        // Attached files ride along as a machine text part (parsed by the UI into
+        // chips, read by the model via readFile) — stored so reloads and later turns
+        // see the same attachments. The literal must match the UI's ATTACHMENTS_MARKER.
+        const attachmentsBlock =
+            attachments && attachments.length > 0
+                ? ATTACHED_FILES_MARKER + JSON.stringify(attachments)
+                : "";
+
+        history.push({
+            id: crypto.randomUUID(),
+            role: "user",
+            metadata: { userId: user.id, userName: user.name } satisfies UserMessageMetadata,
+            parts: [
+                ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
+                ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
+                ...(attachmentsBlock ? [{ type: "text" as const, text: attachmentsBlock }] : []),
+            ],
         });
-        conversationId = created.id;
+
+        // Persist before streaming so the conversation (with the user's message)
+        // survives a reload or chat switch mid-stream; onFinish then overwrites
+        // messages with the completed turn.
+        if (existing) {
+            await updateMessage(existing.id, { messages: history });
+            conversationId = existing.id;
+        } else {
+            const created = await createMessage({
+                id: conversation_id,
+                agentId,
+                userId: user.id,
+                shared: conversationShared,
+                memory: conversationMemory,
+                messages: history,
+            });
+            conversationId = created.id;
+        }
     }
 
     // The owner's per-agent prompt rides after the base prompt. Like the rest of
@@ -329,8 +424,14 @@ export const POST: express.RequestHandler = async (req, res) => {
 
     // Connector tools (Settings → Tools) are per sender and per agent: only
     // connected connectors, filtered by the agent-scoped permission levels.
+    // Interactive: "ask"-level tools pause the stream for approval when no
+    // standing override covers the call.
     // Stable for a given user+agent, so the prompt prefix stays KV-cache friendly.
-    const connectorToolset = await buildConnectorTools({ userId: user.id, agentId });
+    const connectorToolset = await buildConnectorTools({
+        userId: user.id,
+        agentId,
+        interactive: true,
+    });
 
     const system = [
         basePrompt,

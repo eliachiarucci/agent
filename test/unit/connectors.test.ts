@@ -20,6 +20,12 @@ import {
   upsertConnectorSetting,
 } from "../../lib/db/connectors";
 import { getToolPermissions, upsertToolPermissions } from "../../lib/db/tool-permissions";
+import {
+  addToolApprovals,
+  deleteToolApproval,
+  isToolCallApproved,
+  listToolApprovals,
+} from "../../lib/db/tool-approvals";
 import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
 import type { ConnectorTokens } from "../../lib/global/schema";
 
@@ -301,13 +307,13 @@ describe("tool permissions", () => {
     expect(await getToolPermissions(user.id, agent.id)).toEqual({ gmail: {} });
   });
 
-  it('filters gmail tools: missing keys mean allow; "deny" and "ask" withhold', () => {
+  it('filters gmail tools: missing keys mean allow; headless withholds "ask" like "deny"', () => {
     const all = buildGmailTools("user-1");
     expect(Object.keys(all).sort()).toEqual(gmailToolInfo.map((t) => t.name).sort());
 
+    // No approval scope (headless, e.g. cron): nobody is there to ask.
     const filtered = buildGmailTools("user-1", {
       create_draft: "deny",
-      // "ask" is withheld like "deny" until the approval flow exists.
       get_thread: "ask",
       search_threads: "allow",
     });
@@ -315,6 +321,95 @@ describe("tool permissions", () => {
     expect(filtered.get_thread).toBeUndefined();
     expect(filtered.search_threads).toBeDefined();
     expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 2);
+  });
+
+  it('offers "ask" tools with a needsApproval gate in interactive runs', async () => {
+    const { user, agent } = await makeUserWithAgent("Asker");
+    const tools = buildGmailTools(
+      user.id,
+      { create_draft: "ask", get_thread: "deny" },
+      { agentId: agent.id }
+    );
+    expect(tools.get_thread).toBeUndefined();
+    expect(tools.create_draft).toBeDefined();
+    expect(tools.search_threads?.needsApproval).toBeUndefined();
+
+    const needsApproval = tools.create_draft?.needsApproval as (input: unknown) => Promise<boolean>;
+    expect(typeof needsApproval).toBe("function");
+
+    // No standing approval → ask.
+    const input = { to: ["John@Doe.com"], subject: "hi", body: "hello" };
+    expect(await needsApproval(input)).toBe(true);
+
+    // A standing approval for the (tool, target) combination skips the prompt;
+    // recipients are matched case-insensitively.
+    await addToolApprovals({
+      userId: user.id,
+      agentId: agent.id,
+      connector: "gmail",
+      tool: "create_draft",
+      targets: ["john@doe.com"],
+    });
+    expect(await needsApproval(input)).toBe(false);
+    // A recipient outside the approved set still asks.
+    expect(await needsApproval({ ...input, cc: ["jane@doe.com"] })).toBe(true);
+  });
+});
+
+describe("tool approvals (standing overrides)", () => {
+  it("matches only when every target is covered; wildcard covers everything", async () => {
+    const { user, agent } = await makeUserWithAgent("Ova");
+    const base = { userId: user.id, agentId: agent.id, connector: "gmail" as const };
+
+    // Untargeted tool ("targets: null") stores a wildcard row.
+    await addToolApprovals({ ...base, tool: "create_label", targets: null });
+    expect(await isToolCallApproved({ ...base, tool: "create_label", targets: null })).toBe(true);
+    expect(await isToolCallApproved({ ...base, tool: "label_message", targets: null })).toBe(false);
+
+    await addToolApprovals({ ...base, tool: "create_draft", targets: ["a@x.com", "b@x.com"] });
+    expect(
+      await isToolCallApproved({ ...base, tool: "create_draft", targets: ["a@x.com"] })
+    ).toBe(true);
+    expect(
+      await isToolCallApproved({ ...base, tool: "create_draft", targets: ["a@x.com", "b@x.com"] })
+    ).toBe(true);
+    expect(
+      await isToolCallApproved({ ...base, tool: "create_draft", targets: ["a@x.com", "c@x.com"] })
+    ).toBe(false);
+    // A targeted tool with no derivable targets is not covered by target rows.
+    expect(await isToolCallApproved({ ...base, tool: "create_draft", targets: [] })).toBe(false);
+
+    // Re-approving the same combination is a no-op, not an error.
+    await addToolApprovals({ ...base, tool: "create_draft", targets: ["a@x.com"] });
+
+    // Scoped per user+agent.
+    const { agent: other } = await makeUserWithAgent("Ovb");
+    expect(
+      await isToolCallApproved({
+        ...base,
+        agentId: other.id,
+        tool: "create_draft",
+        targets: ["a@x.com"],
+      })
+    ).toBe(false);
+  });
+
+  it("lists and deletes only the owner's rows", async () => {
+    const { user, agent } = await makeUserWithAgent("Del");
+    const stranger = await makeUser("Str");
+    await addToolApprovals({
+      userId: user.id,
+      agentId: agent.id,
+      connector: "gmail",
+      tool: "create_draft",
+      targets: ["a@x.com"],
+    });
+    const [row] = await listToolApprovals(user.id, agent.id);
+    expect(row).toMatchObject({ tool: "create_draft", target: "a@x.com" });
+
+    expect(await deleteToolApproval(row.id, stranger.id)).toBe(false);
+    expect(await deleteToolApproval(row.id, user.id)).toBe(true);
+    expect(await listToolApprovals(user.id, agent.id)).toHaveLength(0);
   });
 });
 
@@ -347,6 +442,16 @@ describe("buildConnectorTools", () => {
     expect(result.tools.label_thread).toBeUndefined();
     expect(result.tools.unlabel_thread).toBeUndefined();
     expect(Object.keys(result.tools)).toHaveLength(gmailToolInfo.length - 2);
+
+    // Interactive (chat): "ask" tools are offered, gated by needsApproval.
+    const interactive = await buildConnectorTools({
+      userId: user.id,
+      agentId: agent.id,
+      interactive: true,
+    });
+    expect(interactive.tools.label_thread).toBeUndefined();
+    expect(interactive.tools.unlabel_thread).toBeDefined();
+    expect(interactive.tools.unlabel_thread?.needsApproval).toBeDefined();
 
     // A different agent has no levels saved → full toolset.
     const full = await buildConnectorTools({ userId: user.id, agentId: other.id });

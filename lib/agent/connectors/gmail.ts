@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { convert } from "html-to-text";
 import { ConnectorAuthError, getConnectorAccessToken } from "./google-auth";
+import { isToolCallApproved } from "../../db/tool-approvals";
 import type { ToolPermissionLevel } from "../../global/schema";
 
 // Env-overridable so tests can stub the Gmail API with a local server.
@@ -459,18 +460,60 @@ async function modifyLabels(
   return { ok: true };
 }
 
+// The "target" of a call, for approval overrides: the user can approve a
+// (tool, target) combination once and have future matching calls run without
+// asking. Tools without an entry have no target concept — their override is
+// tool-wide. Kept per tool so new targeted tools only need a row here.
+const gmailApprovalTargets: Record<string, (input: unknown) => string[]> = {
+  create_draft: (input) => {
+    const { to, cc, bcc } = input as { to?: string[]; cc?: string[]; bcc?: string[] };
+    return [...(to ?? []), ...(cc ?? []), ...(bcc ?? [])].map((email) =>
+      email.trim().toLowerCase()
+    );
+  },
+};
+
+/** Approval targets for one call: string list, or null when the tool is untargeted. */
+export function gmailApprovalTargetsFor(toolName: string, input: unknown): string[] | null {
+  return gmailApprovalTargets[toolName]?.(input) ?? null;
+}
+
 /**
  * The Gmail toolset for a user, filtered by the per-agent permission map
- * (tool name → level; missing = "allow"). "ask" is withheld like "deny" until
- * the human-approval flow exists — a tool the user gated must not run silently.
+ * (tool name → level; missing = "allow"). "ask" tools get a `needsApproval`
+ * check: standing (tool, target) approvals let the call run directly, anything
+ * else pauses the stream for the user to approve or deny in the UI. Headless
+ * runs (no `approval` scope, e.g. cron) withhold "ask" tools like "deny" —
+ * a tool the user gated must not run with nobody there to ask.
  */
 export function buildGmailTools(
   userId: string,
-  permissions?: Record<string, ToolPermissionLevel>
+  permissions?: Record<string, ToolPermissionLevel>,
+  approval?: { agentId: string }
 ): ToolSet {
   const tools = allGmailTools(userId);
   return Object.fromEntries(
-    Object.entries(tools).filter(([name]) => (permissions?.[name] ?? "allow") === "allow")
+    Object.entries(tools).flatMap(([name, definition]) => {
+      const level = permissions?.[name] ?? "allow";
+      if (level === "allow") return [[name, definition]];
+      if (level !== "ask" || !approval) return [];
+      return [
+        [
+          name,
+          {
+            ...definition,
+            needsApproval: async (input: unknown) =>
+              !(await isToolCallApproved({
+                userId,
+                agentId: approval.agentId,
+                connector: "gmail",
+                tool: name,
+                targets: gmailApprovalTargetsFor(name, input),
+              })),
+          },
+        ],
+      ];
+    })
   );
 }
 

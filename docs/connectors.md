@@ -30,9 +30,9 @@ module + catalog entry each).
   (refresh + access token, expiry, scopes, connected email) and a `status`
   (`disconnected | connected | error`). `tool_permissions` — one row per
   (user, agent) with `{ [connector]: { [tool]: "deny" | "ask" | "allow" } }`;
-  missing keys mean `allow`. `ask` is stored for the upcoming human-approval
-  flow — until that exists the runtime withholds those tools like `deny`
-  (a gated tool must never run silently).
+  missing keys mean `allow`. `tool_approvals` — standing "always approve"
+  overrides, one row per (user, agent, connector, tool, target); `target "*"`
+  covers the whole tool (see Human approval below).
 - OAuth (`lib/agent/connectors/google-auth.ts`): authorize-URL builder
   (`access_type=offline&prompt=consent&include_granted_scopes=true`), an
   HMAC-signed `state` (keyed by `BETTER_AUTH_SECRET`, 10-min TTL) binding the
@@ -50,22 +50,61 @@ module + catalog entry each).
   bodies are capped (10k chars/message, 40k/thread) to protect local-model
   context windows. Errors return `{ error }` tool results instead of throwing.
 - Assembly (`lib/agent/connectors/index.ts`): `buildConnectorTools({ userId,
-  agentId })` returns the tools of every *connected* connector filtered by the
-  sender's per-agent permission levels (only `allow` tools are offered), plus
-  the matching system-prompt sections. Wired into the chat route and the cron
-  runner; the prompt/toolset is stable per (user, agent, settings), so the
-  KV-cache prefix rule holds.
+  agentId, interactive })` returns the tools of every *connected* connector
+  filtered by the sender's per-agent permission levels, plus the matching
+  system-prompt sections. `allow` tools are always offered; `ask` tools are
+  offered with a `needsApproval` gate in interactive runs (the chat route) and
+  withheld like `deny` in headless runs (cron — nobody is there to ask). The
+  prompt/toolset is stable per (user, agent, settings), so the KV-cache prefix
+  rule holds.
 - Routes: `GET /agent/connectors` (catalog + masked config; secrets and tokens
   never leave the server), `POST/DELETE /agent/connectors/gmail` (save
   credentials / disconnect+revoke), `GET /agent/connectors/gmail/authorize`
   (302 to Google), `GET /agent/connectors/gmail/callback` (exchange + redirect
   back to the SPA with `?connector=gmail&connector_status=...`),
-  `GET/POST /agent/tool-permissions?agent_id=` (membership-checked).
+  `GET/POST /agent/tool-permissions?agent_id=` and
+  `GET/DELETE /agent/tool-approvals` (membership-checked).
 - UI (`../agent-ui`, Settings → Tools): agent selector on top (permissions are
   per agent), then a collapsible card per connector with the setup wizard
   (links, copyable redirect URI, credential form) and — once connected — a
   Deny / Ask / Allow control per tool, grouped read/write. The OAuth callback
-  lands back in the SPA, which toasts and reopens Settings → Tools.
+  lands back in the SPA, which toasts and reopens Settings → Tools. An
+  "Approval overrides" dialog lists the stored always-approve combinations and
+  lets the user revoke them.
+
+## Human approval ("ask" tools)
+
+The AI SDK's native tool-approval flow, end to end:
+
+- **Pause.** In chat turns, an `ask`-level tool is built with `needsApproval`:
+  when the model calls it, the check first consults `tool_approvals` (standing
+  overrides). Covered → the call runs like `allow`. Not covered → `streamText`
+  emits a `tool-approval-request` and the stream closes with the tool part in
+  state `approval-requested`; `onFinish` persists it. The agent needs no
+  awareness of any of this — it prepares the call normally.
+- **Prompt.** The UI (`agent-ui` `tool-approval.tsx`, rendered by ToolPart)
+  shows what the agent wants to run — tool name, targets (e.g. draft
+  recipients), full input — with three choices: Approve once, Always approve
+  (this tool + target combination), Deny. The composer is blocked while a
+  prompt is pending; decisions go through `addToolApprovalResponse` and, once
+  every pending prompt is answered, the chat auto-resends
+  (`sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses`).
+- **Resume.** The resume request carries `tool_approvals: [{ approval_id,
+  approved, always }]` instead of a message. The conversation route patches the
+  stored history (parts → `approval-responded`), stores overrides for
+  `always: true` (targets derived server-side via `connectorApprovalTargets` —
+  never client-supplied), and re-runs `streamText`, which executes approved
+  calls and turns denials into `execution-denied` tool results the model reacts
+  to. The continuation streams into the same assistant message
+  (`createUIMessageStream({ originalMessages })` reuses its id). Only the turn's
+  sender may respond (the pending call runs on their credentials).
+- **Targets.** Per-tool derivation (`gmail.ts` `gmailApprovalTargets`):
+  `create_draft` → each recipient email (lowercased; one override row per
+  recipient, a call is covered only when *all* recipients are). Tools without a
+  target concept store a single `"*"` row covering every call.
+- **Interrupted prompts.** If the user sends a new message instead of deciding,
+  the route flips pending prompts to `output-denied` ("user sent a new message
+  instead") so the model never sees dangling tool calls.
 
 ## Troubleshooting the consent flow
 
