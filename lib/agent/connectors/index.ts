@@ -1,7 +1,7 @@
 import type { ToolSet } from "ai";
 import { listConnectorSettings } from "../../db/connectors";
 import { getToolPermissions } from "../../db/tool-permissions";
-import type { ConnectorType, ProviderType } from "../../global/schema";
+import type { ConnectorType } from "../../global/schema";
 import { buildGmailTools, GMAIL_SCOPES, gmailPrompt, gmailToolInfo, type ConnectorToolInfo } from "./gmail";
 
 // Everything the settings UI needs to render a connector card: display name,
@@ -16,19 +16,19 @@ export const CONNECTOR_CATALOG: Record<
 
 /**
  * The connector toolset for one chat turn: tools of every *connected*
- * connector the sender has, filtered by their per-model permission toggles
- * (Settings → Tools). Returns the tools plus the matching system-prompt
- * sections. Stable for a given (user, model, settings), so the prompt prefix
+ * connector the sender has, filtered by their per-agent permission levels
+ * (Settings → Tools; only "allow" tools are offered — "ask" is withheld until
+ * the approval flow exists). Returns the tools plus the matching system-prompt
+ * sections. Stable for a given (user, agent, settings), so the prompt prefix
  * stays KV-cache friendly across turns.
  */
 export async function buildConnectorTools(opts: {
   userId: string;
-  provider: ProviderType;
-  model: string;
+  agentId: string;
 }): Promise<{ tools: ToolSet; prompt: string }> {
   const [connectors, permissions] = await Promise.all([
     listConnectorSettings(opts.userId),
-    getToolPermissions(opts.userId, opts.provider, opts.model),
+    getToolPermissions(opts.userId, opts.agentId),
   ]);
 
   const tools: ToolSet = {};

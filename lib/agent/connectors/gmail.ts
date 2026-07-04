@@ -2,6 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { convert } from "html-to-text";
 import { ConnectorAuthError, getConnectorAccessToken } from "./google-auth";
+import type { ToolPermissionLevel } from "../../global/schema";
 
 // Env-overridable so tests can stub the Gmail API with a local server.
 const GMAIL_API_BASE =
@@ -76,8 +77,9 @@ async function run<T>(fn: () => Promise<T>): Promise<T | { error: string }> {
 type GmailHeader = { name?: string; value?: string };
 type GmailPart = {
   mimeType?: string;
+  filename?: string;
   headers?: GmailHeader[];
-  body?: { data?: string; size?: number };
+  body?: { data?: string; size?: number; attachmentId?: string };
   parts?: GmailPart[];
 };
 type GmailMessage = {
@@ -97,31 +99,82 @@ function decodeBody(data: string): string {
   return Buffer.from(data, "base64url").toString("utf8");
 }
 
-// Walks the MIME tree preferring text/plain; falls back to text/html converted
-// to plain text. Multipart containers recurse; attachments (no inline data) are skipped.
-export function extractMessageBody(payload: GmailPart | undefined): string {
-  if (!payload) return "";
-  const collect = (part: GmailPart, want: string): string[] => {
-    const out: string[] = [];
-    if (part.mimeType?.startsWith(want) && part.body?.data) out.push(decodeBody(part.body.data));
-    for (const child of part.parts ?? []) out.push(...collect(child, want));
-    return out;
-  };
-  const plain = collect(payload, "text/plain").join("\n");
-  if (plain.trim()) return plain.trim();
-  const html = collect(payload, "text/html").join("\n");
-  if (!html.trim()) return "";
-  return convert(html, {
-    wordwrap: false,
-    selectors: [
-      { selector: "a", options: { ignoreHref: true } },
-      { selector: "img", format: "skip" },
-      { selector: "style", format: "skip" },
-      { selector: "script", format: "skip" },
-    ],
-  })
+// A MIME part that is a file (attachment or inline image), not body text.
+// Filenames mark explicit attachments; attachmentId also catches inline images
+// referenced by cid: in the HTML.
+function isAttachmentPart(part: GmailPart): boolean {
+  return Boolean(part.filename || part.body?.attachmentId);
+}
+
+// Body parts of the wanted mime type, decoded — attachments excluded, so an
+// attached .txt/.html file never gets mistaken for the message body.
+function collectBodyParts(payload: GmailPart, want: string): string[] {
+  const out: string[] = [];
+  if (!isAttachmentPart(payload) && payload.mimeType?.startsWith(want) && payload.body?.data) {
+    out.push(decodeBody(payload.body.data));
+  }
+  for (const child of payload.parts ?? []) out.push(...collectBodyParts(child, want));
+  return out;
+}
+
+function tidy(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+// The message body as readable text: prefers text/plain, falls back to
+// text/html converted to plain text (links kept as their text, images and
+// styling dropped). Multipart containers recurse.
+export function extractMessageBody(payload: GmailPart | undefined): string {
+  if (!payload) return "";
+  const plain = collectBodyParts(payload, "text/plain").join("\n");
+  if (plain.trim()) return tidy(plain);
+  const html = collectBodyParts(payload, "text/html").join("\n");
+  if (!html.trim()) return "";
+  return tidy(
+    convert(html, {
+      wordwrap: false,
+      selectors: [
+        { selector: "a", options: { ignoreHref: true } },
+        { selector: "img", format: "skip" },
+        { selector: "style", format: "skip" },
+        { selector: "script", format: "skip" },
+      ],
+    })
+  );
+}
+
+// The original body content untouched: text/plain as sent plus the HTML
+// source, for the rare case where the cleaned text loses something the agent
+// needs (get_thread's raw option; off by default).
+export function extractRawBody(payload: GmailPart | undefined): string {
+  if (!payload) return "";
+  return [...collectBodyParts(payload, "text/plain"), ...collectBodyParts(payload, "text/html")]
+    .join("\n\n")
+    .trim();
+}
+
+export type EmailAttachment = { filename: string; mimeType?: string; sizeBytes?: number };
+
+// Attachments and inline images, listed so the agent knows they exist even
+// though their bytes are never inlined into the context.
+export function extractAttachments(payload: GmailPart | undefined): EmailAttachment[] {
+  if (!payload) return [];
+  const out: EmailAttachment[] = [];
+  const walk = (part: GmailPart) => {
+    if (isAttachmentPart(part)) {
+      out.push({
+        filename: part.filename || "(unnamed)",
+        mimeType: part.mimeType,
+        sizeBytes: part.body?.size,
+      });
+    }
+    for (const child of part.parts ?? []) walk(child);
+  };
+  walk(payload);
+  return out;
 }
 
 function truncate(text: string, max: number): string {
@@ -210,17 +263,29 @@ function allGmailTools(userId: string): ToolSet {
 
     get_thread: tool({
       description:
-        "Read a full Gmail thread (all messages with bodies) by thread_id from search_threads.",
-      inputSchema: z.object({ thread_id: z.string().min(1) }),
-      execute: ({ thread_id }) =>
+        "Read a full Gmail thread (all messages) by thread_id from search_threads. Bodies are cleaned to readable plain text and attachments/inline images are listed by name (their content is not included). Pass raw: true only if the cleaned text seems to be missing something — it returns the original body source instead.",
+      inputSchema: z.object({
+        thread_id: z.string().min(1),
+        raw: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Return the original unprocessed body (plain text as sent plus HTML source) instead of cleaned text. Off by default; the raw source is much longer and harder to read."
+          ),
+      }),
+      execute: ({ thread_id, raw }) =>
         run(async () => {
           const thread = await gmailFetch<GmailThread>(userId, `/threads/${thread_id}?format=full`);
           let budget = MAX_THREAD_CHARS;
           const messages = (thread.messages ?? []).map((m) => {
             const headers = m.payload?.headers;
-            let body = truncate(extractMessageBody(m.payload), MAX_BODY_CHARS);
+            let body = truncate(
+              raw ? extractRawBody(m.payload) : extractMessageBody(m.payload),
+              MAX_BODY_CHARS
+            );
             if (body.length > budget) body = "[body omitted — thread too large]";
             budget = Math.max(0, budget - body.length);
+            const attachments = extractAttachments(m.payload);
             return {
               message_id: m.id,
               from: header(headers, "From"),
@@ -230,6 +295,7 @@ function allGmailTools(userId: string): ToolSet {
               subject: header(headers, "Subject"),
               labels: m.labelIds,
               body,
+              ...(attachments.length > 0 ? { attachments } : {}),
             };
           });
           return { thread_id: thread.id, messages };
@@ -394,19 +460,24 @@ async function modifyLabels(
 }
 
 /**
- * The Gmail toolset for a user, filtered by the per-model permission map
- * (tool name → enabled; missing = enabled, only explicit false withholds).
+ * The Gmail toolset for a user, filtered by the per-agent permission map
+ * (tool name → level; missing = "allow"). "ask" is withheld like "deny" until
+ * the human-approval flow exists — a tool the user gated must not run silently.
  */
-export function buildGmailTools(userId: string, enabled?: Record<string, boolean>): ToolSet {
+export function buildGmailTools(
+  userId: string,
+  permissions?: Record<string, ToolPermissionLevel>
+): ToolSet {
   const tools = allGmailTools(userId);
   return Object.fromEntries(
-    Object.entries(tools).filter(([name]) => enabled?.[name] !== false)
+    Object.entries(tools).filter(([name]) => (permissions?.[name] ?? "allow") === "allow")
   );
 }
 
 export const gmailPrompt = [
   "## Gmail",
   "- You are connected to the user's Gmail. search_threads finds email (full Gmail query syntax); get_thread reads one.",
+  "- get_thread returns bodies cleaned to readable text, and lists attachments/inline images by name (you cannot open them). Pass raw: true only when the cleaned text seems to be missing content you need.",
   "- You can organize mail with labels (list_labels, create_label, label/unlabel tools). Removing INBOX archives a thread; removing UNREAD marks it read.",
   "- You can prepare emails with create_draft, but you can never send: drafts wait in Gmail for the user to review and send. Say so when you hand one off.",
   "- Quote email content faithfully and cite the sender/date when summarizing.",

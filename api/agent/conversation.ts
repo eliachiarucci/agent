@@ -327,16 +327,10 @@ export const POST: express.RequestHandler = async (req, res) => {
         model,
     };
 
-    // Connector tools (Settings → Tools) are per sender and per model: only
-    // connected connectors, filtered by the model-scoped permission toggles.
-    // Stable for a given user+model, so the prompt prefix stays KV-cache friendly.
-    const connectorToolset = contextTarget
-        ? await buildConnectorTools({
-              userId: user.id,
-              provider: contextTarget.provider,
-              model: contextTarget.model,
-          })
-        : { tools: {}, prompt: "" };
+    // Connector tools (Settings → Tools) are per sender and per agent: only
+    // connected connectors, filtered by the agent-scoped permission levels.
+    // Stable for a given user+agent, so the prompt prefix stays KV-cache friendly.
+    const connectorToolset = await buildConnectorTools({ userId: user.id, agentId });
 
     const system = [
         basePrompt,

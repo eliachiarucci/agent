@@ -8,7 +8,9 @@ import {
 import {
   buildGmailTools,
   buildRawEmail,
+  extractAttachments,
   extractMessageBody,
+  extractRawBody,
   gmailToolInfo,
 } from "../../lib/agent/connectors/gmail";
 import { buildConnectorTools } from "../../lib/agent/connectors";
@@ -18,7 +20,7 @@ import {
   upsertConnectorSetting,
 } from "../../lib/db/connectors";
 import { getToolPermissions, upsertToolPermissions } from "../../lib/db/tool-permissions";
-import { closeDb, makeUser, resetDb } from "../helpers/db";
+import { closeDb, makeUser, makeUserWithAgent, resetDb } from "../helpers/db";
 import type { ConnectorTokens } from "../../lib/global/schema";
 
 beforeEach(resetDb);
@@ -42,10 +44,10 @@ function tokens(overrides: Partial<ConnectorTokens> = {}): ConnectorTokens {
 }
 
 async function connectedUser(overrides: Partial<ConnectorTokens> = {}) {
-  const user = await makeUser("Connie");
+  const { user, agent } = await makeUserWithAgent("Connie");
   await upsertConnectorSetting(user.id, "gmail", CREDS);
   await setConnectorTokens(user.id, "gmail", tokens(overrides), "connected");
-  return user;
+  return { user, agent };
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -82,7 +84,7 @@ describe("oauth state", () => {
 
 describe("access token refresh", () => {
   it("returns the stored token while it is fresh, without calling Google", async () => {
-    const user = await connectedUser();
+    const { user } = await connectedUser();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await expect(getConnectorAccessToken(user.id, "gmail")).resolves.toBe("access-1");
@@ -90,7 +92,7 @@ describe("access token refresh", () => {
   });
 
   it("refreshes an expired token and persists the result", async () => {
-    const user = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
+    const { user } = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
     const fetchMock = vi
       .fn()
       .mockResolvedValue(jsonResponse({ access_token: "access-2", expires_in: 3600 }));
@@ -110,7 +112,7 @@ describe("access token refresh", () => {
   });
 
   it("single-flights concurrent refreshes", async () => {
-    const user = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
+    const { user } = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
     const fetchMock = vi.fn(
       async () =>
         new Promise<Response>((resolve) =>
@@ -129,7 +131,7 @@ describe("access token refresh", () => {
   });
 
   it("marks the connection broken on invalid_grant", async () => {
-    const user = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
+    const { user } = await connectedUser({ accessTokenExpiresAt: Date.now() - 1000 });
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse({ error: "invalid_grant" }, 400))
@@ -191,6 +193,64 @@ describe("gmail message parsing", () => {
     expect(nested).toBe("nested");
     expect(extractMessageBody({ mimeType: "application/pdf", body: {} })).toBe("");
   });
+
+  it("normalizes CRLF and collapses blank-line runs in plain bodies", () => {
+    const body = extractMessageBody({
+      mimeType: "text/plain",
+      body: { data: b64("hi\r\n\r\n\r\n\r\nthere\r\n") },
+    });
+    expect(body).toBe("hi\n\nthere");
+  });
+
+  it("never mistakes an attached text file for the message body", () => {
+    const payload = {
+      mimeType: "multipart/mixed",
+      parts: [
+        { mimeType: "text/plain", body: { data: b64("real body") } },
+        {
+          mimeType: "text/plain",
+          filename: "notes.txt",
+          body: { data: b64("attached file content"), size: 21 },
+        },
+      ],
+    };
+    expect(extractMessageBody(payload)).toBe("real body");
+    expect(extractRawBody(payload)).toBe("real body");
+  });
+
+  it("lists attachments and inline images without inlining their content", () => {
+    const attachments = extractAttachments({
+      mimeType: "multipart/mixed",
+      parts: [
+        { mimeType: "text/plain", body: { data: b64("body") } },
+        {
+          mimeType: "application/pdf",
+          filename: "invoice.pdf",
+          body: { attachmentId: "att-1", size: 12345 },
+        },
+        // Inline image referenced by cid: — attachmentId but no top-level data.
+        {
+          mimeType: "image/png",
+          filename: "logo.png",
+          body: { attachmentId: "att-2", size: 999 },
+        },
+      ],
+    });
+    expect(attachments).toEqual([
+      { filename: "invoice.pdf", mimeType: "application/pdf", sizeBytes: 12345 },
+      { filename: "logo.png", mimeType: "image/png", sizeBytes: 999 },
+    ]);
+    expect(extractAttachments({ mimeType: "text/plain", body: { data: b64("x") } })).toEqual([]);
+  });
+
+  it("raw extraction returns the original html source uncleaned", () => {
+    const payload = {
+      mimeType: "multipart/alternative",
+      parts: [{ mimeType: "text/html", body: { data: b64("<p>hello <b>there</b></p>") } }],
+    };
+    expect(extractMessageBody(payload)).toBe("hello there");
+    expect(extractRawBody(payload)).toBe("<p>hello <b>there</b></p>");
+  });
 });
 
 describe("draft assembly", () => {
@@ -222,86 +282,83 @@ describe("draft assembly", () => {
 });
 
 describe("tool permissions", () => {
-  it("defaults to {} and round-trips saves per (provider, model)", async () => {
-    const user = await makeUser("Perm");
-    expect(await getToolPermissions(user.id, "anthropic", "claude-x")).toEqual({});
+  it("defaults to {} and round-trips saves per (user, agent)", async () => {
+    const { user, agent } = await makeUserWithAgent("Perm");
+    const { agent: other } = await makeUserWithAgent("Perm2");
+    expect(await getToolPermissions(user.id, agent.id)).toEqual({});
 
-    await upsertToolPermissions(user.id, "anthropic", "claude-x", {
-      gmail: { create_draft: false },
+    await upsertToolPermissions(user.id, agent.id, {
+      gmail: { create_draft: "deny", get_thread: "ask" },
     });
-    expect(await getToolPermissions(user.id, "anthropic", "claude-x")).toEqual({
-      gmail: { create_draft: false },
+    expect(await getToolPermissions(user.id, agent.id)).toEqual({
+      gmail: { create_draft: "deny", get_thread: "ask" },
     });
-    // Other models are unaffected.
-    expect(await getToolPermissions(user.id, "anthropic", "claude-y")).toEqual({});
+    // Other agents are unaffected.
+    expect(await getToolPermissions(user.id, other.id)).toEqual({});
 
     // Saving again replaces the map.
-    await upsertToolPermissions(user.id, "anthropic", "claude-x", { gmail: {} });
-    expect(await getToolPermissions(user.id, "anthropic", "claude-x")).toEqual({ gmail: {} });
+    await upsertToolPermissions(user.id, agent.id, { gmail: {} });
+    expect(await getToolPermissions(user.id, agent.id)).toEqual({ gmail: {} });
   });
 
-  it("filters gmail tools: missing keys mean enabled, false withholds", () => {
+  it('filters gmail tools: missing keys mean allow; "deny" and "ask" withhold', () => {
     const all = buildGmailTools("user-1");
     expect(Object.keys(all).sort()).toEqual(gmailToolInfo.map((t) => t.name).sort());
 
-    const filtered = buildGmailTools("user-1", { create_draft: false, search_threads: true });
+    const filtered = buildGmailTools("user-1", {
+      create_draft: "deny",
+      // "ask" is withheld like "deny" until the approval flow exists.
+      get_thread: "ask",
+      search_threads: "allow",
+    });
     expect(filtered.create_draft).toBeUndefined();
+    expect(filtered.get_thread).toBeUndefined();
     expect(filtered.search_threads).toBeDefined();
-    expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 1);
+    expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 2);
   });
 });
 
 describe("buildConnectorTools", () => {
   it("offers nothing when gmail is not connected or errored", async () => {
-    const user = await makeUser("Uma");
-    let result = await buildConnectorTools({ userId: user.id, provider: "anthropic", model: "m" });
+    const { user, agent } = await makeUserWithAgent("Uma");
+    let result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(Object.keys(result.tools)).toHaveLength(0);
     expect(result.prompt).toBe("");
 
     await upsertConnectorSetting(user.id, "gmail", CREDS);
-    result = await buildConnectorTools({ userId: user.id, provider: "anthropic", model: "m" });
+    result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(Object.keys(result.tools)).toHaveLength(0);
 
     await setConnectorTokens(user.id, "gmail", tokens(), "error");
-    result = await buildConnectorTools({ userId: user.id, provider: "anthropic", model: "m" });
+    result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(Object.keys(result.tools)).toHaveLength(0);
   });
 
   it("offers permission-filtered tools and the gmail prompt when connected", async () => {
-    const user = await connectedUser();
-    await upsertToolPermissions(user.id, "anthropic", "claude-x", {
-      gmail: { label_thread: false, unlabel_thread: false },
+    const { user, agent } = await connectedUser();
+    const { agent: other } = await makeUserWithAgent("Otto");
+    await upsertToolPermissions(user.id, agent.id, {
+      gmail: { label_thread: "deny", unlabel_thread: "ask" },
     });
 
-    const result = await buildConnectorTools({
-      userId: user.id,
-      provider: "anthropic",
-      model: "claude-x",
-    });
+    const result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(result.prompt).toContain("## Gmail");
     expect(result.tools.search_threads).toBeDefined();
     expect(result.tools.label_thread).toBeUndefined();
+    expect(result.tools.unlabel_thread).toBeUndefined();
     expect(Object.keys(result.tools)).toHaveLength(gmailToolInfo.length - 2);
 
-    // A different model has no toggles saved → full toolset.
-    const other = await buildConnectorTools({
-      userId: user.id,
-      provider: "anthropic",
-      model: "claude-y",
-    });
-    expect(Object.keys(other.tools)).toHaveLength(gmailToolInfo.length);
+    // A different agent has no levels saved → full toolset.
+    const full = await buildConnectorTools({ userId: user.id, agentId: other.id });
+    expect(Object.keys(full.tools)).toHaveLength(gmailToolInfo.length);
   });
 
-  it("withholds the prompt when every tool is toggled off", async () => {
-    const user = await connectedUser();
-    await upsertToolPermissions(user.id, "anthropic", "claude-x", {
-      gmail: Object.fromEntries(gmailToolInfo.map((t) => [t.name, false])),
+  it("withholds the prompt when every tool is denied", async () => {
+    const { user, agent } = await connectedUser();
+    await upsertToolPermissions(user.id, agent.id, {
+      gmail: Object.fromEntries(gmailToolInfo.map((t) => [t.name, "deny" as const])),
     });
-    const result = await buildConnectorTools({
-      userId: user.id,
-      provider: "anthropic",
-      model: "claude-x",
-    });
+    const result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(Object.keys(result.tools)).toHaveLength(0);
     expect(result.prompt).toBe("");
   });
@@ -309,7 +366,7 @@ describe("buildConnectorTools", () => {
 
 describe("gmail tools against a stubbed API", () => {
   it("search_threads lists and summarizes threads", async () => {
-    const user = await connectedUser();
+    const { user } = await connectedUser();
     const fetchMock = vi.fn(async (url: any) => {
       const path = String(url);
       if (path.includes("/threads?q=")) {
@@ -354,6 +411,50 @@ describe("gmail tools against a stubbed API", () => {
     ]);
     // The search URL carries the query and cap.
     expect(String(fetchMock.mock.calls[0][0])).toContain("q=from%3Aalice&maxResults=5");
+  });
+
+  it("get_thread cleans bodies, lists attachments, and honors raw", async () => {
+    const { user } = await connectedUser();
+    const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64url");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          id: "t1",
+          messages: [
+            {
+              id: "m1",
+              labelIds: ["INBOX"],
+              payload: {
+                headers: [
+                  { name: "From", value: "Alice <alice@example.com>" },
+                  { name: "Subject", value: "Photos" },
+                ],
+                mimeType: "multipart/mixed",
+                parts: [
+                  { mimeType: "text/html", body: { data: b64("<p>see <b>attached</b></p>") } },
+                  {
+                    mimeType: "image/jpeg",
+                    filename: "cat.jpg",
+                    body: { attachmentId: "a1", size: 4096 },
+                  },
+                ],
+              },
+            },
+          ],
+        })
+      )
+    );
+
+    const tools = buildGmailTools(user.id);
+    const clean = await (tools.get_thread as any).execute({ thread_id: "t1", raw: false }, {});
+    expect(clean.messages[0].body).toBe("see attached");
+    expect(clean.messages[0].attachments).toEqual([
+      { filename: "cat.jpg", mimeType: "image/jpeg", sizeBytes: 4096 },
+    ]);
+
+    const raw = await (tools.get_thread as any).execute({ thread_id: "t1", raw: true }, {});
+    expect(raw.messages[0].body).toBe("<p>see <b>attached</b></p>");
   });
 
   it("surfaces auth problems as a tool error result instead of throwing", async () => {

@@ -339,11 +339,18 @@ export const connectorSettings = pgTable(
   (t) => [uniqueIndex("connector_settings_user_connector_idx").on(t.userId, t.connector)]
 );
 
-// Per-tool switches for connector tools, scoped to a chat model: the Tools
-// settings tab picks a provider+model and toggles individual tools for it.
-// Shape: { [connector]: { [toolName]: enabled } }. A missing connector/tool key
-// means enabled — only explicit `false` withholds a tool.
-export type ToolPermissionsValue = Partial<Record<ConnectorType, Record<string, boolean>>>;
+// Per-tool permission for connector tools, scoped to an agent: the Tools
+// settings tab picks one of the user's agents and sets a level per tool.
+// "ask" is stored for the upcoming human-approval flow; until that lands the
+// runtime treats it like "deny" (tool withheld) rather than silently allowing.
+export const TOOL_PERMISSION_LEVELS = ["deny", "ask", "allow"] as const;
+export type ToolPermissionLevel = (typeof TOOL_PERMISSION_LEVELS)[number];
+
+// Shape: { [connector]: { [toolName]: level } }. A missing connector/tool key
+// means "allow".
+export type ToolPermissionsValue = Partial<
+  Record<ConnectorType, Record<string, ToolPermissionLevel>>
+>;
 
 export const toolPermissions = pgTable(
   "tool_permissions",
@@ -352,15 +359,14 @@ export const toolPermissions = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    provider: text("provider").$type<ProviderType>().notNull(),
-    model: text("model").notNull(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
     permissions: jsonb("permissions").notNull().$type<ToolPermissionsValue>(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
-  (t) => [
-    uniqueIndex("tool_permissions_user_provider_model_idx").on(t.userId, t.provider, t.model),
-  ]
+  (t) => [uniqueIndex("tool_permissions_user_agent_idx").on(t.userId, t.agentId)]
 );
 
 // "once" jobs (reminders) are deleted after their first successful run.

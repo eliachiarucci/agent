@@ -22,7 +22,11 @@ describe("connectors API", () => {
     });
     expect(authorize.status).toBe(401);
     expect(
-      (await client.get("/agent/tool-permissions?provider=anthropic&model=m")).status
+      (
+        await client.get(
+          "/agent/tool-permissions?agent_id=00000000-0000-4000-8000-000000000000"
+        )
+      ).status
     ).toBe(401);
   });
 
@@ -154,68 +158,85 @@ describe("connectors API", () => {
 });
 
 describe("tool permissions API", () => {
-  it("defaults to {} and round-trips per model", async () => {
+  // Sign-up auto-creates a "Personal Assistant" agent; permissions are scoped to it.
+  async function defaultAgentId(client: TestClient): Promise<string> {
+    const { body } = await client.get("/agent/agents");
+    return body[0].id;
+  }
+
+  it("defaults to {} and round-trips per agent", async () => {
     const client = new TestClient(BASE);
     await signUp(client, "Pat");
+    const agentId = await defaultAgentId(client);
 
-    const empty = await client.get("/agent/tool-permissions?provider=anthropic&model=claude-x");
+    const empty = await client.get(`/agent/tool-permissions?agent_id=${agentId}`);
     expect(empty.status).toBe(200);
     expect(empty.body.permissions).toEqual({});
 
     const saved = await client.post("/agent/tool-permissions", {
-      provider: "anthropic",
-      model: "claude-x",
-      permissions: { gmail: { create_draft: false } },
+      agent_id: agentId,
+      permissions: { gmail: { create_draft: "deny", get_thread: "ask", search_threads: "allow" } },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.permissions).toEqual({ gmail: { create_draft: false } });
+    expect(saved.body.permissions).toEqual({
+      gmail: { create_draft: "deny", get_thread: "ask", search_threads: "allow" },
+    });
 
-    const fetched = await client.get(
-      "/agent/tool-permissions?provider=anthropic&model=claude-x"
-    );
-    expect(fetched.body.permissions).toEqual({ gmail: { create_draft: false } });
-
-    // Scoped by model: another model stays untouched.
-    const other = await client.get("/agent/tool-permissions?provider=anthropic&model=claude-y");
-    expect(other.body.permissions).toEqual({});
+    const fetched = await client.get(`/agent/tool-permissions?agent_id=${agentId}`);
+    expect(fetched.body.permissions).toEqual({
+      gmail: { create_draft: "deny", get_thread: "ask", search_threads: "allow" },
+    });
   });
 
   it("validates input", async () => {
     const client = new TestClient(BASE);
     await signUp(client, "Pat");
+    const agentId = await defaultAgentId(client);
     expect((await client.get("/agent/tool-permissions")).status).toBe(400);
     expect(
       (
         await client.post("/agent/tool-permissions", {
-          provider: "nope",
-          model: "m",
+          agent_id: "not-a-uuid",
           permissions: {},
         })
       ).status
     ).toBe(400);
+    // Only deny/ask/allow are accepted levels.
     expect(
       (
         await client.post("/agent/tool-permissions", {
-          provider: "anthropic",
-          model: "m",
+          agent_id: agentId,
           permissions: { gmail: { tool: "yes" } },
         })
       ).status
     ).toBe(400);
   });
 
-  it("permissions are per user", async () => {
+  it("is scoped to agent members", async () => {
     const pat = new TestClient(BASE);
     await signUp(pat, "Pat");
+    const patAgent = await defaultAgentId(pat);
     await pat.post("/agent/tool-permissions", {
-      provider: "anthropic",
-      model: "m",
-      permissions: { gmail: { get_thread: false } },
+      agent_id: patAgent,
+      permissions: { gmail: { get_thread: "deny" } },
     });
 
+    // Sam is not a member of Pat's agent: no reads, no writes.
     const sam = new TestClient(BASE);
     await signUp(sam, "Sam");
-    const { body } = await sam.get("/agent/tool-permissions?provider=anthropic&model=m");
+    expect((await sam.get(`/agent/tool-permissions?agent_id=${patAgent}`)).status).toBe(403);
+    expect(
+      (
+        await sam.post("/agent/tool-permissions", {
+          agent_id: patAgent,
+          permissions: { gmail: { get_thread: "allow" } },
+        })
+      ).status
+    ).toBe(403);
+
+    // Sam's own agent is untouched by Pat's settings.
+    const samAgent = await defaultAgentId(sam);
+    const { body } = await sam.get(`/agent/tool-permissions?agent_id=${samAgent}`);
     expect(body.permissions).toEqual({});
   });
 });

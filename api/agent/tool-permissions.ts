@@ -2,28 +2,35 @@ import express from "express";
 import { z } from "zod";
 import { getSessionUser } from "../../lib/agent/actor";
 import { getToolPermissions, upsertToolPermissions } from "../../lib/db/tool-permissions";
-import { PROVIDER_TYPES } from "../../lib/global/providers";
-import { CONNECTOR_TYPES } from "../../lib/global/schema";
+import { listAgentMembers } from "../../lib/db/agents";
+import { CONNECTOR_TYPES, TOOL_PERMISSION_LEVELS } from "../../lib/global/schema";
 
 export const config = {};
 
-const scopeSchema = z.object({
-  provider: z.enum(PROVIDER_TYPES),
-  model: z.string().min(1),
+const scopeSchema = z.object({ agent_id: z.uuid() });
+
+// { [connector]: { [toolName]: "deny" | "ask" | "allow" } } — missing keys mean
+// "allow", so the UI only persists tools the user actually changed. "ask" is
+// stored for the upcoming approval flow; the runtime withholds those tools for
+// now (lib/agent/connectors).
+const saveSchema = scopeSchema.extend({
+  permissions: z.record(
+    z.enum(CONNECTOR_TYPES),
+    z.record(z.string(), z.enum(TOOL_PERMISSION_LEVELS))
+  ),
 });
 
-// { [connector]: { [toolName]: enabled } } — missing keys mean enabled, so the
-// UI only needs to persist the toggles the user actually flipped off (or back on).
-const saveSchema = scopeSchema.extend({
-  permissions: z.record(z.enum(CONNECTOR_TYPES), z.record(z.string(), z.boolean())),
-});
+async function requireMember(userId: string, agentId: string): Promise<boolean> {
+  const members = await listAgentMembers(agentId);
+  return members.some((m) => m.userId === userId);
+}
 
 export const OPTIONS: express.RequestHandler = async (req, res) => {
   res.set("Allow", "GET, POST, OPTIONS");
   res.sendStatus(204);
 };
 
-// The per-tool switches for one chat model (the model picked at the top of
+// The caller's per-tool levels for one agent (the agent picked at the top of
 // Settings → Tools). {} when nothing was ever saved.
 export const GET: express.RequestHandler = async (req, res) => {
   const parsed = scopeSchema.safeParse(req.query);
@@ -37,9 +44,13 @@ export const GET: express.RequestHandler = async (req, res) => {
     res.status(401).json({ error: "Not authenticated" });
     return;
   }
+  if (!(await requireMember(user.id, parsed.data.agent_id))) {
+    res.status(403).json({ error: "Not a member of this agent" });
+    return;
+  }
 
-  const permissions = await getToolPermissions(user.id, parsed.data.provider, parsed.data.model);
-  res.json({ ...parsed.data, permissions });
+  const permissions = await getToolPermissions(user.id, parsed.data.agent_id);
+  res.json({ agent_id: parsed.data.agent_id, permissions });
 };
 
 export const POST: express.RequestHandler = async (req, res) => {
@@ -54,8 +65,12 @@ export const POST: express.RequestHandler = async (req, res) => {
     res.status(401).json({ error: "Not authenticated" });
     return;
   }
+  const { agent_id, permissions } = parsed.data;
+  if (!(await requireMember(user.id, agent_id))) {
+    res.status(403).json({ error: "Not a member of this agent" });
+    return;
+  }
 
-  const { provider, model, permissions } = parsed.data;
-  const row = await upsertToolPermissions(user.id, provider, model, permissions);
-  res.json({ provider, model, permissions: row.permissions });
+  const row = await upsertToolPermissions(user.id, agent_id, permissions);
+  res.json({ agent_id, permissions: row.permissions });
 };
