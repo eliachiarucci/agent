@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
 
   searxng:
-    image: searxng/searxng:2026.6.8-f3fab143b
+    image: searxng/searxng:2026.7.5-fd5eb84a3
     ports:
       - "8888:8080"
     volumes:
