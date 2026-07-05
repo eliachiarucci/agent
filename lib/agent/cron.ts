@@ -34,6 +34,7 @@ import { buildConversationSearchTools, conversationSearchPrompt } from "./conver
 import { loadSystemPrompt } from "./system-prompt";
 import { nextRunAfter } from "./cron-schedule";
 import { stepsToUIMessageParts } from "./step-ui-messages";
+import { runMemoryExtraction } from "./memory-extraction";
 
 // The job's stored provider/model resolved against the creator's current
 // provider settings, exactly like a chat request. Falls back to the creator's
@@ -145,9 +146,12 @@ async function executeCronJob(
 
   // Connector tools (e.g. Gmail) follow the creator like a normal chat turn:
   // connected connectors only, filtered by their per-agent permission levels.
+  // The job's askPolicy decides what happens to "ask"-level tools with nobody
+  // there to approve: withheld (default) or run unattended.
   const connectorToolset = await buildConnectorTools({
     userId: user.id,
     agentId: agent.id,
+    headlessAskPolicy: job.askPolicy,
   });
 
   const system = [
@@ -182,22 +186,31 @@ async function executeCronJob(
       }),
       ...connectorToolset.tools,
     },
-    stopWhen: stepCountIs(8),
+    stopWhen: stepCountIs(15),
   });
 
   const assistantParts = stepsToUIMessageParts(result.steps);
-  await updateMessage(conversation.id, {
-    messages: [
-      userMessage,
-      {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        parts: assistantParts.length
-          ? assistantParts
-          : [{ type: "text", text: result.text }],
-      } satisfies UIMessage,
-    ],
-  });
+  const messages: UIMessage[] = [
+    userMessage,
+    {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: assistantParts.length
+        ? assistantParts
+        : [{ type: "text", text: result.text }],
+    },
+  ];
+  await updateMessage(conversation.id, { messages });
+
+  // Background memory extraction, exactly like a chat turn's onFinish:
+  // fire-and-forget, and gated internally on the agent's
+  // memoryExtractionEnabled setting and the conversation's memory flag. No
+  // scope (memory off or no pool attached) → nothing to extract into.
+  if (scope) {
+    void runMemoryExtraction({ conversationId: conversation.id, scope, messages }).catch(
+      (error) => console.warn(`[memory] cron extraction failed: ${error}`)
+    );
+  }
 
   let title = job.title;
   if (!title) {

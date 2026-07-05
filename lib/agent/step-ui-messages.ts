@@ -4,8 +4,13 @@ import type { StepResult, ToolSet, UIMessage } from "ai";
 // renders that shape — so non-streaming generateText callers (the cron runner)
 // must convert their steps to the same parts before saving, or tool calls and
 // reasoning silently vanish from the saved conversation.
-export function stepsToUIMessageParts(
-  steps: ReadonlyArray<StepResult<ToolSet>>
+// Generic over the tool set: generateText's `result.steps` is typed with the
+// caller's concrete tools, and StepResult is invariant in that parameter (the
+// ToolApprovalRequestOutput branch), so a plain `StepResult<ToolSet>` param
+// would reject it. Inferring TOOLS from the argument sidesteps that — the body
+// only reads the type-discriminated fields, which exist regardless of TOOLS.
+export function stepsToUIMessageParts<TOOLS extends ToolSet>(
+  steps: ReadonlyArray<StepResult<TOOLS>>
 ): UIMessage["parts"] {
   const parts: UIMessage["parts"] = [];
   const toolParts = new Map<string, Record<string, unknown>>();

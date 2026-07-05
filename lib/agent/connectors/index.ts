@@ -58,6 +58,10 @@ export async function buildConnectorTools(opts: {
   userId: string;
   agentId: string;
   interactive?: boolean;
+  // Headless runs only: what to do with "ask"-level tools — withhold them like
+  // "deny" (default) or run them unattended like "allow" (a cron job's
+  // creator-picked askPolicy). Ignored when interactive.
+  headlessAskPolicy?: "deny" | "allow";
 }): Promise<{ tools: ToolSet; prompt: string }> {
   const [connectors, permissions] = await Promise.all([
     listConnectorSettings(opts.userId),
@@ -72,7 +76,11 @@ export async function buildConnectorTools(opts: {
     const gmailTools = buildGmailTools(
       opts.userId,
       permissions.gmail,
-      opts.interactive ? { agentId: opts.agentId } : undefined
+      opts.interactive
+        ? { agentId: opts.agentId }
+        : opts.headlessAskPolicy === "allow"
+          ? "allow"
+          : undefined
     );
     if (Object.keys(gmailTools).length > 0) {
       Object.assign(tools, gmailTools);

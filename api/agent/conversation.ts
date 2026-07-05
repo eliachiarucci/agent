@@ -125,7 +125,7 @@ function withSpeakerLabels(history: UIMessage[]): UIMessage[] {
 export const config = {}
 
 export const OPTIONS: express.RequestHandler = async (req, res) => {
-    res.set('Allow', 'GET, POST, DELETE, OPTIONS');
+    res.set('Allow', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.sendStatus(204);
 }
 
@@ -626,6 +626,9 @@ const querySchema = z.object({
     from: z.coerce.date().optional(),
     to: z.coerce.date().optional(),
     agent_id: z.uuid().optional(),
+    // "true" → only archived, "false" → only unarchived. Omitted: list requests
+    // exclude archived (the sidebar default); id fetches return either.
+    archived: z.enum(["true", "false"]).optional(),
 });
 
 export const GET: express.RequestHandler = async (req, res) => {
@@ -641,8 +644,14 @@ export const GET: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { agent_id, ...filter } = parsed.data;
-    const conversations = await findMessages({ ...filter, agentId: agent_id, viewerId: viewer.id });
+    const { agent_id, archived, ...filter } = parsed.data;
+    const conversations = await findMessages({
+        ...filter,
+        agentId: agent_id,
+        archived:
+            archived !== undefined ? archived === "true" : filter.id !== undefined ? undefined : false,
+        viewerId: viewer.id,
+    });
     res.json(conversations);
 }
 
@@ -674,4 +683,33 @@ export const DELETE: express.RequestHandler = async (req, res) => {
     // The conversation's file folder goes with it (no DB rows track files).
     await removeConversationFiles(conversation.id);
     res.status(204).end();
+}
+
+// Archive / unarchive: hides the conversation from the default sidebar list
+// without touching its contents. Creator-only, like DELETE.
+export const PATCH: express.RequestHandler = async (req, res) => {
+    const parsed = z.object({ id: z.uuid(), archived: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues });
+        return;
+    }
+
+    const viewer = await getSessionUser(req);
+    if (!viewer) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+    }
+
+    const conversation = await findMessage(parsed.data.id);
+    if (!conversation) {
+        res.status(404).json({ error: "Conversation not found" });
+        return;
+    }
+    if (conversation.userId !== viewer.id) {
+        res.status(403).json({ error: "Only the creator can archive a conversation" });
+        return;
+    }
+
+    const updated = await updateMessage(conversation.id, { archived: parsed.data.archived });
+    res.json(updated);
 }

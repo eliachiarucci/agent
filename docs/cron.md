@@ -49,20 +49,33 @@ memory + search/files/notes tools) but use non-streaming `generateText`. The
 model is the job's stored `provider`/`model` resolved against the creator's
 provider settings at run time, falling back to the env default if unset or
 deconfigured. The conversation row is persisted before generation (parity with
-the chat route), then updated with the assistant's reply.
+the chat route), then updated with the assistant's full response — every step's
+tool calls, results, and reasoning converted to UIMessage parts
+(`lib/agent/step-ui-messages.ts`) so the saved chat renders like a live one.
+After the save, background memory extraction fires exactly like a chat turn's
+`onFinish` (gated on the agent's `memoryExtractionEnabled` and the
+conversation's `memory` flag).
+
+Connector tools follow the job's `ask_policy`: `deny` (default) withholds
+"ask"-level tools like `deny` — nobody is there to approve — while `allow`
+runs them unattended. The policy only applies to the headless run; opening the
+run's conversation and chatting is interactive again, so the agent's normal
+permission levels take over.
 
 ## API (`api/agent/jobs*.ts`)
 
 - `GET /agent/jobs` — the caller's jobs, with agent names.
 - `POST /agent/jobs` — create; body: `agent_id`, `prompt`, `recurrence`,
   `timezone`, and either `days_of_week`+`time` or `at` (ISO datetime, `once`
-  only), plus optional `title` and `provider`/`model` (validated like a chat
-  request).
+  only), plus optional `title`, `provider`/`model` (validated like a chat
+  request), and `ask_policy` (`deny`|`allow`, default `deny`).
 - `PATCH /agent/jobs` — partial update, creator only. Any schedule field
   reschedules from now; `title: null` clears the title (regenerated on the
   next run); `provider: null` returns the job to the env default model;
   `paused: true|false` pauses/resumes the job (resuming recomputes
-  `next_run_at` from now so a slot missed during the pause doesn't fire).
+  `next_run_at` from now so a slot missed during the pause doesn't fire);
+  `agent_id` moves the job to another agent the creator is a member of;
+  `ask_policy` switches the ask-tool behavior.
 - `DELETE /agent/jobs?id=` — creator only.
 - `GET /agent/jobs/runs` — run history (self-contained rows + agent name).
 - `POST /agent/jobs/trigger` — manual run, creator only. Returns 202 and runs

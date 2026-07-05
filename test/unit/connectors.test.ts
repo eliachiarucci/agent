@@ -338,6 +338,16 @@ describe("tool permissions", () => {
     expect(allowed.send_email?.needsApproval).toBeUndefined();
   });
 
+  it('headless "allow" runs "ask" tools unattended (a cron job\'s askPolicy), never "deny" ones', () => {
+    const tools = buildGmailTools("user-1", { get_thread: "deny" }, "allow");
+    // Write tools default to "ask" → included, with no approval gate.
+    expect(tools.create_draft).toBeDefined();
+    expect(tools.create_draft?.needsApproval).toBeUndefined();
+    expect(tools.send_email).toBeDefined();
+    // "deny" stays denied regardless of the policy.
+    expect(tools.get_thread).toBeUndefined();
+  });
+
   it('write tools default to "ask": offered with a needsApproval gate in interactive runs', async () => {
     const { user, agent } = await makeUserWithAgent("Sender");
     const tools = buildGmailTools(user.id, undefined, { agentId: agent.id });

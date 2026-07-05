@@ -220,6 +220,9 @@ export const conversations = pgTable(
     // memories, memory prompt/tools, background extraction). Like `shared`,
     // fixed at creation.
     memory: boolean("memory").notNull().default(true),
+    // Archived conversations are hidden from the default sidebar list but keep
+    // everything else (openable, searchable, files intact). Creator-toggled.
+    archived: boolean("archived").notNull().default(false),
     messages: jsonb("messages").notNull().$type<StoredMessage[]>(),
     // Plaintext of the conversation's user/assistant messages (machine-inserted
     // blocks like <relevant-memories> stripped), maintained on every write by the
@@ -428,6 +431,13 @@ export const toolApprovals = pgTable(
 export const CRON_RECURRENCES = ["once", "weekly", "biweekly", "monthly"] as const;
 export type CronRecurrence = (typeof CRON_RECURRENCES)[number];
 
+// What a headless run does with connector tools the agent has at "ask" level:
+// withhold them like "deny" (default — nobody is there to approve), or run
+// them unattended like "allow". Per job, so one trusted job can act while
+// normal chats keep asking.
+export const CRON_ASK_POLICIES = ["deny", "allow"] as const;
+export type CronAskPolicy = (typeof CRON_ASK_POLICIES)[number];
+
 // A recurring prompt: at each scheduled occurrence the runner executes `prompt`
 // against the agent as the creating user and saves the result as a new private
 // conversation. The schedule is wall-clock (`dayOfWeek` + `time` in `timezone`,
@@ -460,6 +470,10 @@ export const cronJobs = pgTable(
     // (findDueCronJobs filters them out); resuming recomputes nextRunAt so no
     // missed slot fires a backlog run. Manual triggers ignore this flag.
     paused: boolean("paused").notNull().default(false),
+    // Runtime-only override for "ask"-level connector tools (see
+    // CRON_ASK_POLICIES). Resuming the run's conversation in chat is a normal
+    // interactive turn, so the agent's regular permissions apply there.
+    askPolicy: text("ask_policy").$type<CronAskPolicy>().notNull().default("deny"),
     // IANA name (e.g. "Europe/Rome") captured from the creator's browser.
     timezone: text("timezone").notNull(),
     nextRunAt: timestamp("next_run_at").notNull(),

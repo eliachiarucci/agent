@@ -38,6 +38,8 @@ export type FindMessagesFilter = {
   from?: Date;
   to?: Date;
   agentId?: string;
+  /** Filter by archived flag; omit to return both. */
+  archived?: boolean;
   /**
    * Access scoping: only conversations in agents this user is a member of, and
    * within those, only shared conversations or their own private ones.
@@ -153,6 +155,10 @@ export async function findMessages(filter: FindMessagesFilter = {}): Promise<Con
 
   if (filter.agentId !== undefined) {
     conditions.push(eq(conversations.agentId, filter.agentId));
+  }
+
+  if (filter.archived !== undefined) {
+    conditions.push(eq(conversations.archived, filter.archived));
   }
 
   if (filter.viewerId !== undefined) {

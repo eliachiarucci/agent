@@ -11,7 +11,7 @@ import {
     updateCronJob,
 } from "../../lib/db/cron";
 import { getProviderSetting } from "../../lib/db/provider-settings";
-import { CRON_RECURRENCES, PROVIDER_TYPES } from "../../lib/global/schema";
+import { CRON_ASK_POLICIES, CRON_RECURRENCES, PROVIDER_TYPES } from "../../lib/global/schema";
 
 export const config = {}
 
@@ -53,6 +53,9 @@ const createSchema = z
         // request without a selection).
         provider: z.enum(PROVIDER_TYPES).optional(),
         model: z.string().min(1).optional(),
+        // What runs do with "ask"-level connector tools (nobody is there to
+        // approve): withhold them like "deny" (default) or run them unattended.
+        ask_policy: z.enum(CRON_ASK_POLICIES).optional(),
     })
     .refine((d) => d.at !== undefined || (d.days_of_week !== undefined && d.time !== undefined), {
         message: "Provide either at, or days_of_week and time",
@@ -85,6 +88,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         timezone,
         provider,
         model,
+        ask_policy,
     } = parsed.data;
     if (!(await isAgentMember(agent_id, user.id))) {
         res.status(403).json({ error: "Not a member of this agent" });
@@ -143,6 +147,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         timezone,
         provider: provider ?? null,
         model: model ?? null,
+        askPolicy: ask_policy ?? "deny",
         nextRunAt,
     });
     res.status(201).json(job);
@@ -150,6 +155,9 @@ export const POST: express.RequestHandler = async (req, res) => {
 
 const updateSchema = z.object({
     id: z.uuid(),
+    // Move the job to another agent the creator is a member of. Runs pick up
+    // the new agent's memory pool, permissions, and system prompt.
+    agent_id: z.uuid().optional(),
     // null or empty clears the title → the runner regenerates it on the next run.
     title: z.string().nullable().optional(),
     prompt: z.string().min(1).optional(),
@@ -165,6 +173,7 @@ const updateSchema = z.object({
     // null clears both back to the env default model.
     provider: z.enum(PROVIDER_TYPES).nullable().optional(),
     model: z.string().min(1).nullable().optional(),
+    ask_policy: z.enum(CRON_ASK_POLICIES).optional(),
 });
 
 export const PATCH: express.RequestHandler = async (req, res) => {
@@ -190,8 +199,26 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { title, prompt, days_of_week, time, recurrence, timezone, paused, provider, model } =
-        parsed.data;
+    const {
+        agent_id,
+        title,
+        prompt,
+        days_of_week,
+        time,
+        recurrence,
+        timezone,
+        paused,
+        provider,
+        model,
+        ask_policy,
+    } = parsed.data;
+
+    if (agent_id !== undefined && agent_id !== job.agentId) {
+        if (!(await isAgentMember(agent_id, user.id))) {
+            res.status(403).json({ error: "Not a member of this agent" });
+            return;
+        }
+    }
 
     if (provider) {
         const setting = await getProviderSetting(user.id, provider);
@@ -231,9 +258,11 @@ export const PATCH: express.RequestHandler = async (req, res) => {
     }
 
     const updated = await updateCronJob(job.id, {
+        ...(agent_id !== undefined && { agentId: agent_id }),
         ...(title !== undefined && { title: title?.trim() || null }),
         ...(prompt !== undefined && { prompt }),
         ...(paused !== undefined && { paused }),
+        ...(ask_policy !== undefined && { askPolicy: ask_policy }),
         ...((rescheduled || resumed) && {
             daysOfWeek: schedule.daysOfWeek,
             time: schedule.time,

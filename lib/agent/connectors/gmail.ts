@@ -556,12 +556,13 @@ const gmailDefaultLevels: Record<string, ToolPermissionLevel> = Object.fromEntri
  * check: standing (tool, target) approvals let the call run directly, anything
  * else pauses the stream for the user to approve or deny in the UI. Headless
  * runs (no `approval` scope, e.g. cron) withhold "ask" tools like "deny" —
- * a tool the user gated must not run with nobody there to ask.
+ * a tool the user gated must not run with nobody there to ask — unless the
+ * caller passes `"allow"` (a cron job whose creator opted its "ask" tools in).
  */
 export function buildGmailTools(
   userId: string,
   permissions?: Record<string, ToolPermissionLevel>,
-  approval?: { agentId: string }
+  approval?: { agentId: string } | "allow"
 ): ToolSet {
   const tools = allGmailTools(userId);
   return Object.fromEntries(
@@ -569,6 +570,7 @@ export function buildGmailTools(
       const level = permissions?.[name] ?? gmailDefaultLevels[name] ?? "allow";
       if (level === "allow") return [[name, definition]];
       if (level !== "ask" || !approval) return [];
+      if (approval === "allow") return [[name, definition]];
       return [
         [
           name,

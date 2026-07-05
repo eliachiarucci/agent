@@ -85,6 +85,27 @@ describe("POST /agent/jobs", () => {
     expect(weeklyAt.status).toBe(400);
   });
 
+  it("stores the ask-tool policy, defaulting to deny", async () => {
+    const { client, agentId } = await userWithAgent("Alice");
+
+    const defaulted = await client.post("/agent/jobs", validJob(agentId));
+    expect(defaulted.status).toBe(201);
+    expect(defaulted.body.askPolicy).toBe("deny");
+
+    const allowed = await client.post("/agent/jobs", {
+      ...validJob(agentId),
+      ask_policy: "allow",
+    });
+    expect(allowed.status).toBe(201);
+    expect(allowed.body.askPolicy).toBe("allow");
+
+    const invalid = await client.post("/agent/jobs", {
+      ...validJob(agentId),
+      ask_policy: "sometimes",
+    });
+    expect(invalid.status).toBe(400);
+  });
+
   it("rejects a model provider the user has not configured", async () => {
     const { client, agentId } = await userWithAgent("Alice");
     const res = await client.post("/agent/jobs", {
@@ -169,6 +190,32 @@ describe("PATCH /agent/jobs", () => {
     // Resuming pushes nextRunAt back into the future — no backlog run fires.
     expect(new Date(resumed.body.nextRunAt).getTime()).toBeGreaterThan(Date.now());
     expect((await findDueCronJobs(new Date())).some((j) => j.id === job.id)).toBe(false);
+  });
+
+  it("updates the ask-tool policy", async () => {
+    const alice = await userWithAgent("Alice");
+    const { body: job } = await alice.client.post("/agent/jobs", validJob(alice.agentId));
+    expect(job.askPolicy).toBe("deny");
+
+    const updated = await alice.client.patch("/agent/jobs", { id: job.id, ask_policy: "allow" });
+    expect(updated.status).toBe(200);
+    expect(updated.body.askPolicy).toBe("allow");
+  });
+
+  it("moves a job to another agent the creator is a member of", async () => {
+    const alice = await userWithAgent("Alice");
+    const { body: second } = await alice.client.post("/agent/agents", { name: "Second" });
+    const { body: job } = await alice.client.post("/agent/jobs", validJob(alice.agentId));
+
+    const moved = await alice.client.patch("/agent/jobs", { id: job.id, agent_id: second.id });
+    expect(moved.status).toBe(200);
+    expect(moved.body.agentId).toBe(second.id);
+
+    // Not to an agent the creator has no membership in.
+    const bob = await userWithAgent("Bob");
+    const denied = await alice.client.patch("/agent/jobs", { id: job.id, agent_id: bob.agentId });
+    expect(denied.status).toBe(403);
+    expect((await getCronJob(job.id))?.agentId).toBe(second.id);
   });
 
   it("only the creator can update", async () => {

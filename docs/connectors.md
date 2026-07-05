@@ -54,13 +54,15 @@ module + catalog entry each).
   bodies are capped (10k chars/message, 40k/thread) to protect local-model
   context windows. Errors return `{ error }` tool results instead of throwing.
 - Assembly (`lib/agent/connectors/index.ts`): `buildConnectorTools({ userId,
-  agentId, interactive })` returns the tools of every *connected* connector
-  filtered by the sender's per-agent permission levels, plus the matching
-  system-prompt sections. `allow` tools are always offered; `ask` tools are
-  offered with a `needsApproval` gate in interactive runs (the chat route) and
-  withheld like `deny` in headless runs (cron — nobody is there to ask). The
-  prompt/toolset is stable per (user, agent, settings), so the KV-cache prefix
-  rule holds.
+  agentId, interactive, headlessAskPolicy })` returns the tools of every
+  *connected* connector filtered by the sender's per-agent permission levels,
+  plus the matching system-prompt sections. `allow` tools are always offered;
+  `ask` tools are offered with a `needsApproval` gate in interactive runs (the
+  chat route) and withheld like `deny` in headless runs (cron — nobody is
+  there to ask), unless the run passes `headlessAskPolicy: "allow"` (a cron
+  job whose creator set `ask_policy` to `allow` — the gated tools run
+  unattended for that job only). The prompt/toolset is stable per (user,
+  agent, settings), so the KV-cache prefix rule holds.
 - Routes: `GET /agent/connectors` (catalog + masked config; secrets and tokens
   never leave the server), `POST/DELETE /agent/connectors/gmail` (save
   credentials / disconnect+revoke), `GET /agent/connectors/gmail/authorize`
