@@ -307,14 +307,15 @@ describe("tool permissions", () => {
     expect(await getToolPermissions(user.id, agent.id)).toEqual({ gmail: {} });
   });
 
-  it('filters gmail tools: missing keys mean allow; headless withholds "ask" like "deny"', () => {
-    // send_email is the one catalog entry whose unset default is "ask", so a
-    // headless run with no saved levels gets everything except it.
+  it('filters gmail tools: missing keys mean the catalog default (reads "allow", writes "ask"); headless withholds "ask" like "deny"', () => {
+    // Write tools default to "ask", so a headless run with no saved levels
+    // gets only the read tools.
     const all = buildGmailTools("user-1");
     expect(all.send_email).toBeUndefined();
+    expect(all.create_draft).toBeUndefined();
     expect(Object.keys(all).sort()).toEqual(
       gmailToolInfo
-        .filter((t) => t.name !== "send_email")
+        .filter((t) => t.kind === "read")
         .map((t) => t.name)
         .sort()
     );
@@ -329,17 +330,20 @@ describe("tool permissions", () => {
     expect(filtered.get_thread).toBeUndefined();
     expect(filtered.send_email).toBeUndefined();
     expect(filtered.search_threads).toBeDefined();
-    expect(Object.keys(filtered)).toHaveLength(gmailToolInfo.length - 3);
+    expect(Object.keys(filtered).sort()).toEqual(["list_drafts", "list_labels", "search_threads"]);
 
-    // An explicit "allow" overrides send_email's "ask" default, even headless.
+    // An explicit "allow" overrides a write tool's "ask" default, even headless.
     const allowed = buildGmailTools("user-1", { send_email: "allow" });
     expect(allowed.send_email).toBeDefined();
     expect(allowed.send_email?.needsApproval).toBeUndefined();
   });
 
-  it('send_email defaults to "ask": offered with a needsApproval gate in interactive runs', async () => {
+  it('write tools default to "ask": offered with a needsApproval gate in interactive runs', async () => {
     const { user, agent } = await makeUserWithAgent("Sender");
     const tools = buildGmailTools(user.id, undefined, { agentId: agent.id });
+    expect(tools.create_draft?.needsApproval).toBeDefined();
+    expect(tools.label_thread?.needsApproval).toBeDefined();
+    expect(tools.search_threads?.needsApproval).toBeUndefined();
     expect(tools.send_email).toBeDefined();
     const needsApproval = tools.send_email?.needsApproval as (input: unknown) => Promise<boolean>;
     expect(typeof needsApproval).toBe("function");
@@ -472,14 +476,22 @@ describe("buildConnectorTools", () => {
       gmail: { label_thread: "deny", unlabel_thread: "ask" },
     });
 
-    // Headless: the two saved levels are withheld, plus send_email's "ask" default.
+    // Headless: the two saved levels are withheld, and every other write tool
+    // sits at its "ask" default — only the read tools remain, and the prompt
+    // stops mentioning drafting and labeling.
     const result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(result.prompt).toContain("## Gmail");
-    expect(result.prompt).toContain("you can never send");
+    expect(result.prompt).not.toContain("create_draft");
+    expect(result.prompt).not.toContain("labels");
     expect(result.tools.search_threads).toBeDefined();
     expect(result.tools.label_thread).toBeUndefined();
     expect(result.tools.unlabel_thread).toBeUndefined();
-    expect(Object.keys(result.tools)).toHaveLength(gmailToolInfo.length - 3);
+    expect(Object.keys(result.tools).sort()).toEqual(
+      gmailToolInfo
+        .filter((t) => t.kind === "read")
+        .map((t) => t.name)
+        .sort()
+    );
 
     // Interactive (chat): "ask" tools are offered, gated by needsApproval, and
     // the prompt's send guidance flips with send_email available.
@@ -495,10 +507,12 @@ describe("buildConnectorTools", () => {
     expect(interactive.prompt).not.toContain("you can never send");
     expect(interactive.prompt).toContain("send_email sends immediately");
 
-    // A different agent has no levels saved → full toolset minus the
-    // default-"ask" send_email (headless run).
+    // A different agent has no levels saved → catalog defaults: a headless
+    // run offers the read tools only (writes default to "ask").
     const full = await buildConnectorTools({ userId: user.id, agentId: other.id });
-    expect(Object.keys(full.tools)).toHaveLength(gmailToolInfo.length - 1);
+    expect(Object.keys(full.tools)).toHaveLength(
+      gmailToolInfo.filter((t) => t.kind === "read").length
+    );
   });
 
   it("withholds the prompt when every tool is denied", async () => {

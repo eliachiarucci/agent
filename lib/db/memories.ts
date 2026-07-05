@@ -6,7 +6,7 @@ import { embedText } from "../global/ai";
 export type Memory = typeof memories.$inferSelect;
 
 export type NewMemory = {
-  agentId: string;
+  poolId: string;
   content: string;
   importance: number;
   category: MemoryCategory;
@@ -16,7 +16,7 @@ export type NewMemory = {
   createdBy?: string | null;
 };
 
-export type MemoryChanges = Partial<Omit<NewMemory, "agentId" | "createdBy">>;
+export type MemoryChanges = Partial<Omit<NewMemory, "poolId" | "createdBy">>;
 
 export type FindMemoriesFilter = {
   category?: MemoryCategory;
@@ -60,7 +60,7 @@ export async function createMemory(data: NewMemory, embedding?: number[]): Promi
  * are included: a duplicate of a pinned fact is still a duplicate.
  */
 export async function findSimilarMemories(
-  agentId: string,
+  poolId: string,
   embedding: number[],
   options: { minSimilarity: number; limit?: number }
 ): Promise<Array<Memory & { similarity: number }>> {
@@ -68,14 +68,14 @@ export async function findSimilarMemories(
   const rows = await db
     .select({ memory: memories, similarity })
     .from(memories)
-    .where(and(eq(memories.agentId, agentId), sql`${similarity} >= ${options.minSimilarity}`))
+    .where(and(eq(memories.poolId, poolId), sql`${similarity} >= ${options.minSimilarity}`))
     .orderBy(desc(similarity))
     .limit(options.limit ?? 3);
   return rows.map((r) => ({ ...r.memory, similarity: Number(r.similarity) }));
 }
 
 export async function updateMemory(
-  agentId: string,
+  poolId: string,
   id: string,
   changes: MemoryChanges
 ): Promise<Memory | undefined> {
@@ -84,31 +84,31 @@ export async function updateMemory(
   const [row] = await db
     .update(memories)
     .set({ ...changes, ...(embedding ? { embedding } : {}) })
-    .where(and(eq(memories.id, id), eq(memories.agentId, agentId)))
+    .where(and(eq(memories.id, id), eq(memories.poolId, poolId)))
     .returning();
   return row;
 }
 
-export async function deleteMemory(agentId: string, id: string): Promise<Memory | undefined> {
+export async function deleteMemory(poolId: string, id: string): Promise<Memory | undefined> {
   const [row] = await db
     .delete(memories)
-    .where(and(eq(memories.id, id), eq(memories.agentId, agentId)))
+    .where(and(eq(memories.id, id), eq(memories.poolId, poolId)))
     .returning();
   return row;
 }
 
-export async function getPinnedMemories(agentId: string): Promise<Memory[]> {
+export async function getPinnedMemories(poolId: string): Promise<Memory[]> {
   return db.query.memories.findMany({
-    where: and(eq(memories.agentId, agentId), eq(memories.pinned, true)),
+    where: and(eq(memories.poolId, poolId), eq(memories.pinned, true)),
     orderBy: memories.createdAt,
   });
 }
 
 export async function findMemories(
-  agentId: string,
+  poolId: string,
   filter: FindMemoriesFilter = {}
 ): Promise<Memory[]> {
-  const conditions = [eq(memories.agentId, agentId)];
+  const conditions = [eq(memories.poolId, poolId)];
   if (filter.category !== undefined) conditions.push(eq(memories.category, filter.category));
   if (filter.pinned !== undefined) conditions.push(eq(memories.pinned, filter.pinned));
   if (filter.contains !== undefined)
@@ -127,7 +127,7 @@ export async function findMemories(
  * into the prompt anyway.
  */
 export async function searchMemories(
-  agentId: string,
+  poolId: string,
   query: string,
   options: SearchMemoriesOptions = {}
 ): Promise<Array<Memory & { score: number }>> {
@@ -141,7 +141,7 @@ export async function searchMemories(
     score = sql<number>`${score} + ${WEIGHTS.subject} * (case when ${memories.subjectUserId} is null or ${memories.subjectUserId} = ${options.speakerUserId} then 1.0 else 0.0 end)`;
   }
 
-  const conditions: SQL[] = [eq(memories.agentId, agentId), eq(memories.pinned, false)];
+  const conditions: SQL[] = [eq(memories.poolId, poolId), eq(memories.pinned, false)];
   if (options.category !== undefined) conditions.push(eq(memories.category, options.category));
   if (options.minRelevance !== undefined) conditions.push(sql`${relevance} >= ${options.minRelevance}`);
 

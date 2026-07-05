@@ -31,7 +31,7 @@ describe("RAG retrieval with real embeddings", () => {
       { content: "Elia's favourite food is carbonara", subjectUserId: elia.id, category: "food" },
     ] as const;
     for (const fact of facts) {
-      await createMemory({ ...fact, agentId: agent.id, importance: 0.5 });
+      await createMemory({ ...fact, poolId: agent.memoryPoolId!, importance: 0.5 });
     }
 
     return { elia, anna, agent };
@@ -41,14 +41,14 @@ describe("RAG retrieval with real embeddings", () => {
     const { elia, anna, agent } = await householdScenario();
 
     const forElia = await searchMemories(
-      agent.id,
+      agent.memoryPoolId!,
       "Elia: can you find rubber mats for my car?",
       { speakerUserId: elia.id }
     );
     expect(forElia[0].content).toBe("Elia's car is a Golf 7");
 
     const forAnna = await searchMemories(
-      agent.id,
+      agent.memoryPoolId!,
       "Anna: can you find rubber mats for my car?",
       { speakerUserId: anna.id }
     );
@@ -59,7 +59,7 @@ describe("RAG retrieval with real embeddings", () => {
     const { anna, agent } = await householdScenario();
 
     const results = await searchMemories(
-      agent.id,
+      agent.memoryPoolId!,
       "Anna: how much can we spend on the kitchen?",
       { speakerUserId: anna.id }
     );
@@ -69,7 +69,7 @@ describe("RAG retrieval with real embeddings", () => {
   it("explicit questions about another member still surface their facts", async () => {
     const { anna, agent } = await householdScenario();
 
-    const results = await searchMemories(agent.id, "Anna: what car does Elia drive?", {
+    const results = await searchMemories(agent.memoryPoolId!, "Anna: what car does Elia drive?", {
       speakerUserId: anna.id,
     });
     expect(results.map((m) => m.content).slice(0, 2)).toContain("Elia's car is a Golf 7");
@@ -78,7 +78,7 @@ describe("RAG retrieval with real embeddings", () => {
   it("retrieves across languages (Italian query, English memory)", async () => {
     const { elia, agent } = await householdScenario();
 
-    const results = await searchMemories(agent.id, "Elia: cosa dovrei cucinare stasera?", {
+    const results = await searchMemories(agent.memoryPoolId!, "Elia: cosa dovrei cucinare stasera?", {
       speakerUserId: elia.id,
     });
     expect(results[0].content).toBe("Elia's favourite food is carbonara");
@@ -93,14 +93,14 @@ describe("RAG retrieval with real embeddings", () => {
     // calibration drifted — re-measure with `npm run calibrate`.
     const paraphrase = await embedText("Elia drives a Volkswagen Golf 7", "document");
     expect(
-      (await findSimilarMemories(agent.id, paraphrase, { minSimilarity: 0.8 })).map(
+      (await findSimilarMemories(agent.memoryPoolId!, paraphrase, { minSimilarity: 0.8 })).map(
         (m) => m.content
       )
     ).toContain("Elia's car is a Golf 7");
 
     const contradiction = await embedText("Elia's car is a Tesla Model 3", "document");
     expect(
-      (await findSimilarMemories(agent.id, contradiction, { minSimilarity: 0.8 })).map(
+      (await findSimilarMemories(agent.memoryPoolId!, contradiction, { minSimilarity: 0.8 })).map(
         (m) => m.content
       )
     ).toContain("Elia's car is a Golf 7");
@@ -108,16 +108,17 @@ describe("RAG retrieval with real embeddings", () => {
     // Same-shaped fact about another member, and a new fact about the same
     // member: both must store freely.
     const otherMember = await embedText("Elia's car is a Golf 7", "document");
-    const hits = await findSimilarMemories(agent.id, otherMember, { minSimilarity: 0.8 });
+    const hits = await findSimilarMemories(agent.memoryPoolId!, otherMember, { minSimilarity: 0.8 });
     expect(hits.map((m) => m.content)).not.toContain("Anna's car is a Fiat Panda");
 
     const newFact = await embedText("Elia plays tennis on Thursdays", "document");
-    expect(await findSimilarMemories(agent.id, newFact, { minSimilarity: 0.8 })).toHaveLength(0);
+    expect(await findSimilarMemories(agent.memoryPoolId!, newFact, { minSimilarity: 0.8 })).toHaveLength(0);
 
     // End-to-end through the tool: the paraphrase is refused with the
     // existing memory's id, the distinct fact is stored.
     const scope: MemoryScope = {
       agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       speaker: { id: elia.id, name: "Elia" },
       members: [{ userId: elia.id, name: "Elia", role: "member" }],
     };
@@ -142,6 +143,7 @@ describe("RAG retrieval with real embeddings", () => {
     const { elia, agent } = await householdScenario();
     const scope: MemoryScope = {
       agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       speaker: { id: elia.id, name: "Elia" },
       members: [{ userId: elia.id, name: "Elia", role: "member" }],
     };

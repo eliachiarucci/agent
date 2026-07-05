@@ -10,9 +10,8 @@ export const config = {};
 const scopeSchema = z.object({ agent_id: z.uuid() });
 
 // { [connector]: { [toolName]: "deny" | "ask" | "allow" } } — missing keys mean
-// "allow", so the UI only persists tools the user actually changed. "ask" is
-// stored for the upcoming approval flow; the runtime withholds those tools for
-// now (lib/agent/connectors).
+// the tool's catalog default ("allow" for read tools, "ask" for write tools),
+// so the UI only persists tools the user actually changed.
 const saveSchema = scopeSchema.extend({
   permissions: z.record(
     z.enum(CONNECTOR_TYPES),

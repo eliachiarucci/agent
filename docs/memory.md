@@ -4,9 +4,9 @@ The agent has a long-term memory: facts about its users (preferences, people, ev
 
 ## Multi-tenancy
 
-The system is multi-tenant: users own **agents**, and each agent has its own isolated memory pool. Owners can share an agent with other users (`agent_members`), which grants full access to its memories and shared conversations — sharing an agent means sharing its memory.
+The system is multi-tenant: users own **agents**, and memories live in named **memory pools** (`memory_pools`) decoupled from agents. Each agent points at (at most) one pool via `agents.memory_pool_id`; several agents can point at the same pool and then share every memory, and an agent with no pool attached runs with memory off (no recall, no memory tools, no background extraction). Creating an agent auto-creates a pool named after it, so memory works out of the box. Owners can share an agent with other users (`agent_members`), which grants full access to its pool's memories and shared conversations — sharing an agent means sharing its memory.
 
-- **Agents are the tenancy boundary.** Memories carry an `agent_id` and never cross agents; a freshly created or freshly shared agent knows nothing until told.
+- **Pools are the tenancy boundary.** Memories carry a `pool_id` and never cross pools; a freshly created pool knows nothing until told. Pools are owned by the user who created them (`memory_pools.owner_id`), managed in Settings → Memory (`/agent/memory-pools`), and attached to agents in Settings → Agent (`PATCH /agent/agents` with `memory_pool_id`; only the caller's own pools, since attaching exposes the pool to every agent member). Deleting a pool deletes its memories and detaches its agents; deleting an agent leaves its pool (and memories) intact.
 - **Attribution inside a shared agent** is two-layered: facts are phrased in third person with names (`"Elia's car is a Golf 7"`, enforced by the tool prompts) *and* carry a structured `subject_user_id` (`NULL` = shared/group fact). Retrieval boosts the speaker's own and shared facts rather than hard-filtering, so "what's Anna's shoe size" still works for Elia.
 - **Conversations are private by default** (visible only to their creator). A conversation created with `shared: true` is visible to all agent members, and each user message in it is labeled with the speaker's name when sent to the model (the stored messages stay clean; labels are added deterministically at prompt-build time, so the KV cache stays valid).
 - **Speaker identity reaches the model differently per mode:** in a private conversation the system prompt names the single speaker (stable per conversation); in a shared one the system prompt stays speaker-neutral and the per-message labels carry identity.
@@ -54,7 +54,7 @@ Memories live in the `memories` table ([lib/global/schema.ts](../lib/global/sche
 | Column             | Type          | Purpose                                                          |
 | ------------------ | ------------- | ---------------------------------------------------------------- |
 | `id`               | `uuid` (v7)   | Primary key; shown to the model so it can update/forget facts.   |
-| `agent_id`         | `uuid`        | The agent this memory belongs to; memories never cross agents.   |
+| `pool_id`          | `uuid`        | The memory pool this memory belongs to; memories never cross pools. |
 | `subject_user_id`  | `uuid?`       | Who the fact is about; `NULL` = shared fact about the group.     |
 | `created_by`       | `uuid?`       | Which member stored the fact.                                    |
 | `content`          | `text`        | The fact as a short, third-person sentence naming the subject.   |
@@ -91,7 +91,7 @@ The floor is a junk guard, not a precision filter, and it is calibrated for the 
 
 ## Duplicate guard
 
-`remember` checks every candidate fact against the agent's pool before writing: the content is embedded once, `findSimilarMemories` ([lib/db/memories.ts](../lib/db/memories.ts)) runs a plain cosine search with it (no recency/importance blending, no `last_accessed_at` touch, pinned included), and if anything scores at or above `DUPLICATE_MIN_SIMILARITY` (`0.80`, [lib/agent/memory.ts](../lib/agent/memory.ts)) the insert is skipped. The tool result carries the similar memories' ids and contents plus instructions: update the existing memory if the fact changed, do nothing if it is already stored, or re-call `remember` with `allowDuplicate: true` if it is genuinely distinct. On a clean store the precomputed embedding is reused for the insert, so the check costs one extra SELECT, not a second embed.
+`remember` checks every candidate fact against the memory pool before writing: the content is embedded once, `findSimilarMemories` ([lib/db/memories.ts](../lib/db/memories.ts)) runs a plain cosine search with it (no recency/importance blending, no `last_accessed_at` touch, pinned included), and if anything scores at or above `DUPLICATE_MIN_SIMILARITY` (`0.80`, [lib/agent/memory.ts](../lib/agent/memory.ts)) the insert is skipped. The tool result carries the similar memories' ids and contents plus instructions: update the existing memory if the fact changed, do nothing if it is already stored, or re-call `remember` with `allowDuplicate: true` if it is genuinely distinct. On a clean store the precomputed embedding is reused for the insert, so the check costs one extra SELECT, not a second embed.
 
 This threshold lives in a different regime from the retrieval floor: both sides embed as kind *document*, which yields much higher cosines than query-vs-document. Measured bands (`npm run calibrate`): paraphrases and changed-value contradictions of the same fact ~0.84–0.98, distinct facts — including same-shaped facts about another member ("Elia's car…" vs "Anna's car…" ≈ 0.54) — ~0.54–0.75. `0.80` splits them with margin; `test/ai/rag.test.ts` guards both bands. Recalibrate alongside the retrieval floor whenever the embedding model, dtype, or memory phrasing changes.
 
@@ -104,7 +104,7 @@ The chat model writing its own memories mid-conversation is best-effort — it c
 - **Memory conversation:** there is one `memory_conversations` row per source conversation (unique on `conversation_id`, cascades on delete). It stores the extractor's running history as **`ModelMessage[]`** (it runs headless via `generateText`, never rendered, unlike `conversations` which keep `UIMessage`s). Each turn appends the new exchange and the extractor's reply — including its memory tool calls and results — so across turns it keeps the context of what it has already stored. The `remember` duplicate guard prevents re-storing the same fact.
 - **System prompt** (`MEMORY_EXTRACTION_SYSTEM_PROMPT`): store durable, personal facts (preferences, people, work, places, routines, health, dates); ignore transient/trivial things (one-off lookups, how-tos, copywriting, grammar checks, generated code); phrase third-person with names; `recallMemories` before storing; do nothing when there is nothing to remember.
 - **Model:** the agent's configured memory model (`agents.memory_provider` / `memory_model`), owner-picked in **Settings → Agent → Memory model**. It is resolved against the **owner's** provider credentials exactly like a chat request (`resolveMemoryModel`, mirroring cron's `resolveJobModel`), and falls back to the env-configured `CHAT_MODEL` when unset or when that provider has since been deconfigured. Independent of whatever provider/model the turn itself used.
-- **Tools:** only `buildMemoryTools(scope)` — the same `remember`/`updateMemory`/`forget`/`recallMemories` the chat model gets, scoped to the same agent pool and attributing `created_by` to the turn's sender.
+- **Tools:** only `buildMemoryTools(scope)` — the same `remember`/`updateMemory`/`forget`/`recallMemories` the chat model gets, scoped to the same memory pool and attributing `created_by` to the turn's sender.
 - **Inspecting them:** read-only via `GET /agent/memory-conversations` (list) and `?id=` (one, with messages flattened to text + tool calls/results). Access mirrors the source conversation — a private chat's memory conversation stays private. Surfaced in the UI behind the Memories dialog's "View memory conversations" (list → conversation, same in-dialog navigation as recurring jobs).
 - **Compaction:** the running log grows for the whole life of the source conversation and is re-sent in full each turn, so it is auto-compacted (see below) — destructively, since the durable facts already live in the memory store.
 
@@ -122,7 +122,7 @@ Both the chat history and the memory-extraction log grow without bound, and a lo
 
 ## Agent tools
 
-Built per request by `buildMemoryTools(scope)` in [lib/agent/memory.ts](../lib/agent/memory.ts) — the scope (`MemoryScope`) pins the agent, the speaker, and the member list, so every tool call stays inside one agent's pool — and attached to the conversation route with `stopWhen: stepCountIs(8)`:
+Built per request by `buildMemoryTools(scope)` in [lib/agent/memory.ts](../lib/agent/memory.ts) — the scope (`MemoryScope`) pins the agent, its memory pool, the speaker, and the member list, so every tool call stays inside one pool — and attached to the conversation route with `stopWhen: stepCountIs(8)`:
 
 | Tool             | What it does                                                                  |
 | ---------------- | ----------------------------------------------------------------------------- |
@@ -138,7 +138,7 @@ Two prompt builders live in the same file:
 
 ## REST API
 
-[api/agent/memory.ts](../api/agent/memory.ts) exposes memories for inspection and manual management. Embedding vectors are stripped from all responses. All routes require a session and take an optional `agent_id` (default: the user's oldest agent; the user must be a member).
+[api/agent/memory.ts](../api/agent/memory.ts) exposes memories for inspection and manual management. Embedding vectors are stripped from all responses. All routes require a session and scope to a pool: pass `pool_id` directly (the caller must own the pool or be a member of an agent attached to it), or `agent_id` to use that agent's attached pool (default: the user's oldest agent; the user must be a member). A `GET` through an agent with no pool returns `[]`; writes through one are rejected.
 
 | Method   | Route                | Notes                                                                                     |
 | -------- | -------------------- | ----------------------------------------------------------------------------------------- |
@@ -147,6 +147,8 @@ Two prompt builders live in the same file:
 | `POST`   | `/agent/memory`      | Body: `{ content, importance, category, pinned?, subject_user_id? }` (`null` = shared fact; defaults to the acting user). Embeds and stores. |
 | `PATCH`  | `/agent/memory`      | Body: `{ id, ...changes }`. Re-embeds if `content` changes.                                |
 | `DELETE` | `/agent/memory?id=…` | Deletes the memory.                                                                        |
+
+Memory pools have their own routes ([api/agent/memory-pools.ts](../api/agent/memory-pools.ts)): `GET /agent/memory-pools` lists the caller's pools with memory counts and attached agents, `POST` creates one (`{ name }`), `DELETE ?id=` removes it (owner-only; cascades to its memories, detaches its agents).
 
 Agent and account management live in their own routes: `/agent/users` (GET/POST), `/agent/agents` (GET/POST/PATCH/DELETE, owner-only mutations), `/agent/members` (GET/POST/DELETE — sharing; owner-only adds, members can remove themselves). `/agent/conversation` accepts `agent_id`, `user_id`, and `shared` (creation only) and scopes GET/DELETE to what the user may see.
 

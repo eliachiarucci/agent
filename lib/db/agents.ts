@@ -3,6 +3,7 @@ import { db } from "../global/db";
 import {
   agentMembers,
   agents,
+  memoryPools,
   users,
   type AgentMemberRole,
   type ProviderType,
@@ -16,10 +17,20 @@ export type AgentMember = {
   role: AgentMemberRole;
 };
 
-/** Creates the agent and the owner's membership row in one transaction. */
+/**
+ * Creates the agent, the owner's membership row, and — so memory works out of
+ * the box — a memory pool named after the agent, attached to it. One transaction.
+ */
 export async function createAgent(data: { name: string; ownerId: string }): Promise<Agent> {
   return db.transaction(async (tx) => {
-    const [agent] = await tx.insert(agents).values(data).returning();
+    const [pool] = await tx
+      .insert(memoryPools)
+      .values({ name: data.name, ownerId: data.ownerId })
+      .returning();
+    const [agent] = await tx
+      .insert(agents)
+      .values({ ...data, memoryPoolId: pool.id })
+      .returning();
     await tx
       .insert(agentMembers)
       .values({ agentId: agent.id, userId: data.ownerId, role: "owner" });
@@ -36,6 +47,8 @@ export async function updateAgent(
   changes: {
     name?: string;
     systemPrompt?: string | null;
+    // The memory pool the agent reads/writes; null detaches it (memory off).
+    memoryPoolId?: string | null;
     // Set together (or both null to reset to the env default).
     memoryProvider?: ProviderType | null;
     memoryModel?: string | null;

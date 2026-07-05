@@ -16,12 +16,14 @@ import { embedText } from "../global/ai";
 const categorySchema = z.enum(MEMORY_CATEGORIES);
 
 /**
- * Everything memory operations need to stay inside one agent's pool and
+ * Everything memory operations need to stay inside one memory pool and
  * attribute facts to the right person. Built per request in the conversation
- * route; `speaker` is whoever sent the current message.
+ * route; `poolId` is the agent's attached pool (callers skip memory entirely
+ * when the agent has none), `speaker` is whoever sent the current message.
  */
 export type MemoryScope = {
   agentId: string;
+  poolId: string;
   speaker: { id: string; name: string };
   members: AgentMember[];
 };
@@ -89,7 +91,7 @@ export function buildMemoryTools(scope: MemoryScope) {
       execute: async ({ subject, allowDuplicate, ...input }) => {
         const embedding = await embedText(input.content, "document");
         if (!allowDuplicate) {
-          const similar = await findSimilarMemories(scope.agentId, embedding, {
+          const similar = await findSimilarMemories(scope.poolId, embedding, {
             minSimilarity: DUPLICATE_MIN_SIMILARITY,
           });
           if (similar.length > 0) {
@@ -104,7 +106,7 @@ export function buildMemoryTools(scope: MemoryScope) {
         const memory = await createMemory(
           {
             ...input,
-            agentId: scope.agentId,
+            poolId: scope.poolId,
             subjectUserId: subjectToUserId(scope, subject),
             createdBy: scope.speaker.id,
           },
@@ -126,7 +128,7 @@ export function buildMemoryTools(scope: MemoryScope) {
         pinned: z.boolean().optional(),
       }),
       execute: async ({ id, subject, ...changes }) => {
-        const memory = await updateMemory(scope.agentId, id, {
+        const memory = await updateMemory(scope.poolId, id, {
           ...changes,
           ...(subject !== undefined ? { subjectUserId: subjectToUserId(scope, subject) } : {}),
         });
@@ -142,7 +144,7 @@ export function buildMemoryTools(scope: MemoryScope) {
         id: z.uuid(),
       }),
       execute: async ({ id }) => {
-        const memory = await deleteMemory(scope.agentId, id);
+        const memory = await deleteMemory(scope.poolId, id);
         if (!memory) return { error: "Memory not found" };
         return { deleted: memory.content };
       },
@@ -156,7 +158,7 @@ export function buildMemoryTools(scope: MemoryScope) {
         category: categorySchema.optional(),
       }),
       execute: async ({ query, category }) => {
-        const results = await searchMemories(scope.agentId, query, {
+        const results = await searchMemories(scope.poolId, query, {
           category,
           limit: 8,
           speakerUserId: scope.speaker.id,
@@ -206,7 +208,7 @@ export async function buildMemorySystemPrompt(
     customPrompt,
   }: { sharedConversation: boolean; customPrompt?: string | null }
 ): Promise<string> {
-  const pinned = await getPinnedMemories(scope.agentId);
+  const pinned = await getPinnedMemories(scope.poolId);
 
   const memberNames = scope.members.map((m) => m.name).join(", ");
   const membersLine =
@@ -249,7 +251,7 @@ export async function buildRelevantMemoriesBlock(
   // The speaker prefix puts the asker's name into the embedding so "my car"
   // lands nearer "Elia's car is a Golf 7" than another member's car; the
   // subject bonus in searchMemories handles the rest deterministically.
-  const retrieved = await searchMemories(scope.agentId, `${scope.speaker.name}: ${queryText}`, {
+  const retrieved = await searchMemories(scope.poolId, `${scope.speaker.name}: ${queryText}`, {
     limit: AUTO_RECALL_LIMIT,
     minRelevance: AUTO_RECALL_MIN_RELEVANCE,
     speakerUserId: scope.speaker.id,

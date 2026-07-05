@@ -327,12 +327,17 @@ export const POST: express.RequestHandler = async (req, res) => {
     // no recalled memories, no memory prompt/tools for the chat model, and the
     // background extractor skips the conversation (checked in extractTurn).
     const conversationMemory = existing ? existing.memory : memory ?? true;
-    const memoryEnabled = agent.chatMemoryEnabled && conversationMemory;
-    const scope: MemoryScope = {
-        agentId,
-        speaker: { id: user.id, name: user.name },
-        members,
-    };
+    // Memory needs a pool: an agent with none attached (Settings → Memory)
+    // behaves like one with chat memory switched off, extraction included.
+    const scope: MemoryScope | null = agent.memoryPoolId
+        ? {
+              agentId,
+              poolId: agent.memoryPoolId,
+              speaker: { id: user.id, name: user.name },
+              members,
+          }
+        : null;
+    const memoryScope = agent.chatMemoryEnabled && conversationMemory ? scope : null;
 
     // Retrieved memories ride along with the user message instead of the system
     // prompt: everything before this point in the prompt is then byte-identical to
@@ -343,11 +348,11 @@ export const POST: express.RequestHandler = async (req, res) => {
     // Approval turns append no user message, so they retrieve nothing.
     const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
         loadSystemPrompt(),
-        memoryEnabled && !tool_approvals
-            ? buildRelevantMemoriesBlock(scope, buildRetrievalQuery(history, message))
+        memoryScope && !tool_approvals
+            ? buildRelevantMemoriesBlock(memoryScope, buildRetrievalQuery(history, message))
             : null,
-        memoryEnabled
-            ? buildMemorySystemPrompt(scope, {
+        memoryScope
+            ? buildMemorySystemPrompt(memoryScope, {
                   sharedConversation: conversationShared,
                   customPrompt: agent.chatMemoryPrompt,
               })
@@ -474,7 +479,7 @@ export const POST: express.RequestHandler = async (req, res) => {
     // File tools are pinned to this conversation's folder (one folder per
     // conversation); note tools to the agent's shared notes.
     const tools = {
-        ...(memoryEnabled ? buildMemoryTools(scope) : {}),
+        ...(memoryScope ? buildMemoryTools(memoryScope) : {}),
         ...searchTools,
         ...buildDateTools(cronScope.timezone),
         ...buildFileTools(conversationId),
@@ -542,10 +547,12 @@ export const POST: express.RequestHandler = async (req, res) => {
             // Background memory extraction: a dedicated model inspects the just-
             // finished exchange and stores durable facts (lib/agent/memory-
             // extraction.ts). Fire-and-forget — it must never block or fail the
-            // turn, so errors are logged and swallowed.
-            void runMemoryExtraction({ conversationId, scope, messages }).catch((error) =>
-                console.warn(`[memory] extraction failed: ${error}`)
-            );
+            // turn, so errors are logged and swallowed. No pool → no extraction.
+            if (scope) {
+                void runMemoryExtraction({ conversationId, scope, messages }).catch((error) =>
+                    console.warn(`[memory] extraction failed: ${error}`)
+                );
+            }
         },
         execute: async ({ writer }) => {
             // Stream the model's reply to the client.

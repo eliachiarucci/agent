@@ -50,7 +50,7 @@ async function carScenario() {
     // Identical vectors: relevance/recency/importance all tie, so ranking is
     // decided purely by the subject bonus under test.
     fixedEmbeddings.set(fact.content, CAR_TOPIC);
-    await createMemory({ ...fact, agentId: agent.id, importance: 0.5, category: "other" });
+    await createMemory({ ...fact, poolId: agent.memoryPoolId!, importance: 0.5, category: "other" });
   }
   fixedEmbeddings.set("my car", CAR_TOPIC);
 
@@ -61,17 +61,17 @@ describe("searchMemories subject boost", () => {
   it("ranks other members' facts last on ambiguous queries, per speaker", async () => {
     const { elia, anna, agent } = await carScenario();
 
-    const forElia = await searchMemories(agent.id, "my car", { speakerUserId: elia.id });
+    const forElia = await searchMemories(agent.memoryPoolId!, "my car", { speakerUserId: elia.id });
     expect(forElia.map((m) => m.content).at(-1)).toBe("Anna's car is a Fiat Panda");
 
-    const forAnna = await searchMemories(agent.id, "my car", { speakerUserId: anna.id });
+    const forAnna = await searchMemories(agent.memoryPoolId!, "my car", { speakerUserId: anna.id });
     expect(forAnna.map((m) => m.content).at(-1)).toBe("Elia's car is a Golf 7");
   });
 
   it("boosts shared (subject-less) facts alongside the speaker's own", async () => {
     const { elia, agent } = await carScenario();
 
-    const results = await searchMemories(agent.id, "my car", { speakerUserId: elia.id });
+    const results = await searchMemories(agent.memoryPoolId!, "my car", { speakerUserId: elia.id });
     const topTwo = results.slice(0, 2).map((m) => m.content);
     expect(topTwo).toContain("Elia's car is a Golf 7");
     expect(topTwo).toContain("The kitchen renovation budget is 10000 euro");
@@ -80,7 +80,7 @@ describe("searchMemories subject boost", () => {
   it("applies no bonus when the speaker is unknown", async () => {
     const { agent } = await carScenario();
 
-    const results = await searchMemories(agent.id, "my car");
+    const results = await searchMemories(agent.memoryPoolId!, "my car");
     const scores = results.map((m) => m.score);
     // All three memories tie on every score component without the bonus.
     expect(Math.max(...scores) - Math.min(...scores)).toBeLessThan(1e-6);
@@ -88,21 +88,21 @@ describe("searchMemories subject boost", () => {
 });
 
 describe("searchMemories scoping and filters", () => {
-  it("never returns memories from another agent", async () => {
+  it("never returns memories from another pool", async () => {
     const { agent: agentA } = await makeUserWithAgent("Alice");
     const { agent: agentB } = await makeUserWithAgent("Bob");
 
     fixedEmbeddings.set("Bob's secret fact", CAR_TOPIC);
     fixedEmbeddings.set("anything", CAR_TOPIC);
     await createMemory({
-      agentId: agentB.id,
+      poolId: agentB.memoryPoolId!,
       content: "Bob's secret fact",
       importance: 0.9,
       category: "other",
     });
 
-    expect(await searchMemories(agentA.id, "anything")).toHaveLength(0);
-    expect(await searchMemories(agentB.id, "anything")).toHaveLength(1);
+    expect(await searchMemories(agentA.memoryPoolId!, "anything")).toHaveLength(0);
+    expect(await searchMemories(agentB.memoryPoolId!, "anything")).toHaveLength(1);
   });
 
   it("excludes pinned memories from search results (they are always in the prompt)", async () => {
@@ -110,35 +110,35 @@ describe("searchMemories scoping and filters", () => {
     fixedEmbeddings.set("Alice is allergic to peanuts", CAR_TOPIC);
     fixedEmbeddings.set("allergies", CAR_TOPIC);
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice is allergic to peanuts",
       importance: 1,
       category: "health",
       pinned: true,
     });
 
-    expect(await searchMemories(agent.id, "allergies")).toHaveLength(0);
-    expect(await getPinnedMemories(agent.id)).toHaveLength(1);
+    expect(await searchMemories(agent.memoryPoolId!, "allergies")).toHaveLength(0);
+    expect(await getPinnedMemories(agent.memoryPoolId!)).toHaveLength(1);
   });
 
   it("drops memories below the minRelevance floor", async () => {
     const { agent } = await makeUserWithAgent("Alice");
     // Different fake seeds are near-orthogonal: relevance ≈ 0 for the stray fact.
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice's car is a Golf 7",
       importance: 0.5,
       category: "other",
     });
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Completely unrelated quantum chromodynamics trivia",
       importance: 0.9,
       category: "other",
     });
     fixedEmbeddings.set("what car does she drive", fakeEmbedding("Alice's car is a Golf 7"));
 
-    const results = await searchMemories(agent.id, "what car does she drive", {
+    const results = await searchMemories(agent.memoryPoolId!, "what car does she drive", {
       minRelevance: 0.45,
     });
     expect(results.map((m) => m.content)).toEqual(["Alice's car is a Golf 7"]);
@@ -146,18 +146,18 @@ describe("searchMemories scoping and filters", () => {
 });
 
 describe("findSimilarMemories", () => {
-  it("returns memories above the floor, scoped to the agent, including pinned", async () => {
+  it("returns memories above the floor, scoped to the pool, including pinned", async () => {
     const { agent } = await makeUserWithAgent("Alice");
     const { agent: other } = await makeUserWithAgent("Bob");
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice's car is a Golf 7",
       importance: 0.5,
       category: "other",
       pinned: true,
     });
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Completely unrelated quantum chromodynamics trivia",
       importance: 0.5,
       category: "other",
@@ -165,11 +165,11 @@ describe("findSimilarMemories", () => {
 
     // Same seed = identical vector: similarity 1; other seeds ≈ orthogonal.
     const probe = fakeEmbedding("Alice's car is a Golf 7");
-    const hits = await findSimilarMemories(agent.id, probe, { minSimilarity: 0.8 });
+    const hits = await findSimilarMemories(agent.memoryPoolId!, probe, { minSimilarity: 0.8 });
     expect(hits.map((m) => m.content)).toEqual(["Alice's car is a Golf 7"]);
     expect(hits[0].similarity).toBeCloseTo(1, 5);
 
-    expect(await findSimilarMemories(other.id, probe, { minSimilarity: 0.8 })).toHaveLength(0);
+    expect(await findSimilarMemories(other.memoryPoolId!, probe, { minSimilarity: 0.8 })).toHaveLength(0);
   });
 });
 
@@ -180,11 +180,12 @@ describe("remember tool duplicate guard", () => {
     const { user, agent } = await makeUserWithAgent("Alice");
     const scope: MemoryScope = {
       agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       speaker: { id: user.id, name: "Alice" },
       members: [{ userId: user.id, name: "Alice", role: "member" }],
     };
     const existing = await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice's car is a Golf 7",
       subjectUserId: user.id,
       importance: 0.5,
@@ -205,7 +206,7 @@ describe("remember tool duplicate guard", () => {
 
     expect(result.stored).toBe(false);
     expect(result.similar.map((m) => m.id)).toContain(existing.id);
-    expect(await findMemories(agent.id)).toHaveLength(1);
+    expect(await findMemories(agent.memoryPoolId!)).toHaveLength(1);
   });
 
   it("stores anyway when allowDuplicate is set", async () => {
@@ -223,7 +224,7 @@ describe("remember tool duplicate guard", () => {
     )) as { id: string };
 
     expect(result.id).toBeDefined();
-    expect(await findMemories(agent.id)).toHaveLength(2);
+    expect(await findMemories(agent.memoryPoolId!)).toHaveLength(2);
   });
 
   it("stores distinct facts without tripping the guard", async () => {
@@ -240,7 +241,7 @@ describe("remember tool duplicate guard", () => {
     )) as { id: string; stored: string };
 
     expect(result.stored).toBe("Alice's favourite food is carbonara");
-    expect(await findMemories(agent.id)).toHaveLength(2);
+    expect(await findMemories(agent.memoryPoolId!)).toHaveLength(2);
   });
 });
 
@@ -248,7 +249,7 @@ describe("buildMemorySystemPrompt custom prompt", () => {
   async function promptScenario() {
     const { user, agent } = await makeUserWithAgent("Alice");
     await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice is vegetarian",
       importance: 0.9,
       category: "food",
@@ -256,6 +257,7 @@ describe("buildMemorySystemPrompt custom prompt", () => {
     });
     const scope: MemoryScope = {
       agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       speaker: { id: user.id, name: user.name },
       members: [{ userId: user.id, name: user.name, role: "owner" }],
     };
@@ -296,21 +298,21 @@ describe("buildMemorySystemPrompt custom prompt", () => {
   });
 });
 
-describe("updateMemory / cross-agent protection", () => {
-  it("re-embeds on content change and refuses cross-agent updates", async () => {
+describe("updateMemory / cross-pool protection", () => {
+  it("re-embeds on content change and refuses cross-pool updates", async () => {
     const { agent } = await makeUserWithAgent("Alice");
     const { agent: otherAgent } = await makeUserWithAgent("Bob");
     const memory = await createMemory({
-      agentId: agent.id,
+      poolId: agent.memoryPoolId!,
       content: "Alice's car is a Golf 7",
       importance: 0.5,
       category: "other",
     });
 
-    // Scoped to the wrong agent: must not touch the row.
-    expect(await updateMemory(otherAgent.id, memory.id, { content: "hijacked" })).toBeUndefined();
+    // Scoped to the wrong pool: must not touch the row.
+    expect(await updateMemory(otherAgent.memoryPoolId!, memory.id, { content: "hijacked" })).toBeUndefined();
 
-    const updated = await updateMemory(agent.id, memory.id, { content: "Alice's car is a Tesla" });
+    const updated = await updateMemory(agent.memoryPoolId!, memory.id, { content: "Alice's car is a Tesla" });
     expect(updated?.content).toBe("Alice's car is a Tesla");
     expect(updated?.embedding).not.toEqual(memory.embedding);
   });

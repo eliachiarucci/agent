@@ -18,7 +18,7 @@ const MAX_SEARCH_RESULTS = 25;
 
 // What connecting Gmail asks for. gmail.compose covers drafts *and* sending,
 // so send_email needs no extra scope or reconsent — the guard against unwanted
-// sends is the permission system (send_email defaults to "ask"), not the
+// sends is the permission system (write tools default to "ask"), not the
 // scope. openid+email identify the connected account in the UI.
 export const GMAIL_SCOPES = [
   "openid",
@@ -30,34 +30,43 @@ export const GMAIL_SCOPES = [
 
 // The permission catalog the settings UI renders toggles from. Names mirror
 // Claude's official Gmail connector so the surface feels familiar.
-// `defaultLevel` is the level applied when the user never saved one (missing =
-// "allow" for everything else): send_email starts at "ask" so a fresh
-// connection can never send mail without a human approving each call.
+// `defaultLevel` is the level applied when the user never saved one — i.e.
+// what a freshly created agent gets: read tools start at "allow", write tools
+// at "ask" so no agent can mutate the mailbox without a human approving each
+// call until its owner explicitly allows it.
 export type ConnectorToolKind = "read" | "write";
 export type ConnectorToolInfo = {
   name: string;
   kind: ConnectorToolKind;
   description: string;
-  defaultLevel?: ToolPermissionLevel;
+  defaultLevel: ToolPermissionLevel;
 };
 
+const read = (name: string, description: string): ConnectorToolInfo => ({
+  name,
+  kind: "read",
+  description,
+  defaultLevel: "allow",
+});
+const write = (name: string, description: string): ConnectorToolInfo => ({
+  name,
+  kind: "write",
+  description,
+  defaultLevel: "ask",
+});
+
 export const gmailToolInfo: ConnectorToolInfo[] = [
-  { name: "search_threads", kind: "read", description: "Search emails with Gmail query syntax" },
-  { name: "get_thread", kind: "read", description: "Read a full email thread" },
-  { name: "list_labels", kind: "read", description: "List the mailbox's labels" },
-  { name: "list_drafts", kind: "read", description: "List existing drafts" },
-  { name: "create_draft", kind: "write", description: "Create a draft email (never sends)" },
-  {
-    name: "send_email",
-    kind: "write",
-    description: "Send an email from the connected account",
-    defaultLevel: "ask",
-  },
-  { name: "create_label", kind: "write", description: "Create a new label" },
-  { name: "label_message", kind: "write", description: "Add labels to a message" },
-  { name: "unlabel_message", kind: "write", description: "Remove labels from a message" },
-  { name: "label_thread", kind: "write", description: "Add labels to a thread" },
-  { name: "unlabel_thread", kind: "write", description: "Remove labels from a thread" },
+  read("search_threads", "Search emails with Gmail query syntax"),
+  read("get_thread", "Read a full email thread"),
+  read("list_labels", "List the mailbox's labels"),
+  read("list_drafts", "List existing drafts"),
+  write("create_draft", "Create a draft email (never sends)"),
+  write("send_email", "Send an email from the connected account"),
+  write("create_label", "Create a new label"),
+  write("label_message", "Add labels to a message"),
+  write("unlabel_message", "Remove labels from a message"),
+  write("label_thread", "Add labels to a thread"),
+  write("unlabel_thread", "Remove labels from a thread"),
 ];
 
 // ── Gmail REST helpers ───────────────────────────────────────────────────────
@@ -534,15 +543,16 @@ export function gmailApprovalTargetsFor(toolName: string, input: unknown): strin
 }
 
 // The level applied when the user never saved one for a tool: the catalog's
-// defaultLevel, or "allow" — the settings UI mirrors this fallback.
+// defaultLevel ("allow" for reads, "ask" for writes) — the settings UI
+// mirrors this fallback.
 const gmailDefaultLevels: Record<string, ToolPermissionLevel> = Object.fromEntries(
-  gmailToolInfo.filter((t) => t.defaultLevel).map((t) => [t.name, t.defaultLevel!])
+  gmailToolInfo.map((t) => [t.name, t.defaultLevel])
 );
 
 /**
  * The Gmail toolset for a user, filtered by the per-agent permission map
- * (tool name → level; missing = the tool's catalog default, "allow" for all
- * but send_email which defaults to "ask"). "ask" tools get a `needsApproval`
+ * (tool name → level; missing = the tool's catalog default: "allow" for read
+ * tools, "ask" for write tools). "ask" tools get a `needsApproval`
  * check: standing (tool, target) approvals let the call run directly, anything
  * else pauses the stream for the user to approve or deny in the UI. Headless
  * runs (no `approval` scope, e.g. cron) withhold "ask" tools like "deny" —
@@ -581,19 +591,29 @@ export function buildGmailTools(
 
 // The Gmail system-prompt section, phrased for the toolset actually offered:
 // the send guidance must not promise "you can never send" when send_email is
-// available, nor mention sending when it was denied/withheld. Stable per
-// (user, agent, settings), so the KV-cache prefix rule holds.
+// available, nor mention drafting/sending/labeling when those tools were
+// denied or withheld (write tools default to "ask", so headless runs offer
+// only read tools unless explicitly allowed). Stable per (user, agent,
+// settings), so the KV-cache prefix rule holds.
 export function gmailPromptFor(tools: ToolSet): string {
   const sendLine =
     "send_email" in tools
       ? "- create_draft prepares an email for the user to review and send from Gmail; send_email sends immediately with no review step. Default to create_draft — only send when the user asked you to send."
-      : "- You can prepare emails with create_draft, but you can never send: drafts wait in Gmail for the user to review and send. Say so when you hand one off.";
+      : "create_draft" in tools
+        ? "- You can prepare emails with create_draft, but you can never send: drafts wait in Gmail for the user to review and send. Say so when you hand one off."
+        : null;
+  const labelTools = ["create_label", "label_message", "unlabel_message", "label_thread", "unlabel_thread"];
+  const labelLine = labelTools.some((name) => name in tools)
+    ? "- You can organize mail with labels (list_labels, create_label, label/unlabel tools). Removing INBOX archives a thread; removing UNREAD marks it read."
+    : null;
   return [
     "## Gmail",
     "- You are connected to the user's Gmail. search_threads finds email (full Gmail query syntax); get_thread reads one.",
     "- get_thread returns bodies cleaned to readable text, and lists attachments/inline images by name (you cannot open them). Pass raw: true only when the cleaned text seems to be missing content you need.",
-    "- You can organize mail with labels (list_labels, create_label, label/unlabel tools). Removing INBOX archives a thread; removing UNREAD marks it read.",
+    labelLine,
     sendLine,
     "- Quote email content faithfully and cite the sender/date when summarizing.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

@@ -130,12 +130,35 @@ export const passkey = pgTable("passkey", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Named memory stores, decoupled from agents: a pool can back one agent,
+// several agents (they then share every memory), or none. Owned by the user
+// who created it; deleting a pool deletes its memories (cascade), while
+// deleting an agent leaves the pool — and its memories — intact.
+export const memoryPools = pgTable(
+  "memory_pools",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("memory_pools_owner_idx").on(t.ownerId)]
+);
+
 export const agents = pgTable("agents", {
   id: uuid("id").primaryKey().default(sql`uuidv7()`),
   ownerId: uuid("owner_id")
     .notNull()
     .references(() => users.id),
   name: text("name").notNull(),
+  // The memory pool this agent reads from and writes to. NULL = no memory:
+  // no recall, no memory tools, no background extraction. Several agents may
+  // point at the same pool (shared memory); deleting the pool detaches them.
+  memoryPoolId: uuid("memory_pool_id").references(() => memoryPools.id, {
+    onDelete: "set null",
+  }),
   // Owner-written instructions appended to the built-in system prompt on every
   // turn. Session-stable, so it doesn't break KV-cache reuse (docs/memory.md).
   systemPrompt: text("system_prompt"),
@@ -531,10 +554,11 @@ export const memories = pgTable(
   "memories",
   {
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
-    // Memories never cross agents: each agent has its own pool.
-    agentId: uuid("agent_id")
+    // Memories live in pools, not on agents: every agent attached to the pool
+    // sees the same memories.
+    poolId: uuid("pool_id")
       .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
+      .references(() => memoryPools.id, { onDelete: "cascade" }),
     // Who the fact is about. NULL = shared/group fact (e.g. "the kitchen budget is 10k").
     // Retrieval boosts subject == speaker (and NULL) instead of hard-filtering, so
     // "what's my wife's shoe size" can still surface another member's facts.
@@ -553,6 +577,6 @@ export const memories = pgTable(
   (t) => [
     index("memories_embedding_idx").using("hnsw", t.embedding.op("vector_cosine_ops")),
     index("memories_category_idx").on(t.category),
-    index("memories_agent_idx").on(t.agentId),
+    index("memories_pool_idx").on(t.poolId),
   ]
 );

@@ -20,11 +20,14 @@ async function sharedAgentScenario() {
   const ownerUser = await signUp(owner, "Owner");
   const memberUser = await signUp(member, "Member");
 
-  const agentId: string = (await owner.get("/agent/agents")).body[0].id;
+  const agentRow = (await owner.get("/agent/agents")).body[0];
+  const agentId: string = agentRow.id;
+  // The pool auto-created with the agent — where its memories live.
+  const poolId: string = agentRow.memoryPoolId;
   const share = await owner.post("/agent/members", { agent_id: agentId, member_id: memberUser.id });
   expect(share.status).toBe(201);
 
-  return { owner, member, ownerUser, memberUser, agentId };
+  return { owner, member, ownerUser, memberUser, agentId, poolId };
 }
 
 describe("agent sharing", () => {
@@ -135,14 +138,14 @@ describe("conversation visibility over HTTP", () => {
 });
 
 describe("memory API scoping", () => {
-  it("memories are listed per agent and PATCH/DELETE stay inside it", async () => {
-    const { owner, member, memberUser, agentId } = await sharedAgentScenario();
+  it("memories are listed per agent and PATCH/DELETE stay inside its pool", async () => {
+    const { owner, member, memberUser, agentId, poolId } = await sharedAgentScenario();
 
     // Seeded directly (embedding included) so no embedding model is needed.
     const [row] = await db
       .insert(memories)
       .values({
-        agentId,
+        poolId,
         content: "Owner's car is a Golf 7",
         embedding: fakeEmbedding("golf"),
         importance: 0.5,

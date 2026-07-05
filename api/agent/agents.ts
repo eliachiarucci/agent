@@ -11,6 +11,7 @@ import {
     listAgentsForUser,
     updateAgent,
 } from "../../lib/db/agents";
+import { getMemoryPool } from "../../lib/db/memory-pools";
 
 export const config = {}
 
@@ -58,6 +59,8 @@ const updateSchema = z
         name: z.string().min(1).optional(),
         // null/empty clears the prompt back to "no custom instructions".
         system_prompt: z.string().nullable().optional(),
+        // The memory pool the agent reads/writes; null detaches (memory off).
+        memory_pool_id: z.uuid().nullable().optional(),
         // The background memory extractor's model. Set as a pair (null on both
         // resets to the env-configured default model).
         memory_provider: z.enum(PROVIDER_TYPES).nullable().optional(),
@@ -76,6 +79,7 @@ const updateSchema = z
         (d) =>
             d.name !== undefined ||
             d.system_prompt !== undefined ||
+            d.memory_pool_id !== undefined ||
             d.memory_provider !== undefined ||
             d.memory_model !== undefined ||
             d.chat_memory_enabled !== undefined ||
@@ -111,6 +115,7 @@ export const PATCH: express.RequestHandler = async (req, res) => {
     const {
         name,
         system_prompt,
+        memory_pool_id,
         memory_provider,
         memory_model,
         chat_memory_enabled,
@@ -118,9 +123,21 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         memory_extraction_enabled,
         memory_extraction_prompt,
     } = parsed.data;
+    // Only the caller's own pools can be attached: the agent's members gain
+    // read/write access to every memory in it, so attaching someone else's
+    // pool would leak its contents.
+    if (memory_pool_id != null) {
+        const pool = await getMemoryPool(memory_pool_id);
+        if (!pool || pool.ownerId !== user.id) {
+            res.status(404).json({ error: "Memory pool not found" });
+            return;
+        }
+    }
+
     res.json(
         await updateAgent(agent.id, {
             ...(name !== undefined && { name }),
+            ...(memory_pool_id !== undefined && { memoryPoolId: memory_pool_id }),
             ...(system_prompt !== undefined && { systemPrompt: system_prompt?.trim() || null }),
             ...(memory_provider !== undefined && { memoryProvider: memory_provider }),
             ...(memory_model !== undefined && { memoryModel: memory_model }),

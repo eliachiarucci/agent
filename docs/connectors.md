@@ -16,12 +16,14 @@ module + catalog entry each).
   minutes once) and pastes the client id/secret. The consent screen then looks
   exactly like connecting any app — Google account picker, permission list —
   and tokens are held only by this server.
-- **Drafts only, never send.** The Gmail toolset mirrors Claude's official
+- **Writes gated by default.** The Gmail toolset mirrors Claude's official
   connector surface: `search_threads`, `get_thread`, `list_labels`,
-  `list_drafts`, `create_draft`, `create_label`, `label_message`/`unlabel_message`,
-  `label_thread`/`unlabel_thread`. The requested scopes (`gmail.readonly`,
-  `gmail.compose`, `gmail.labels`) cannot send mail; `create_draft` leaves the
-  human to press Send in Gmail.
+  `list_drafts`, `create_draft`, `send_email`, `create_label`,
+  `label_message`/`unlabel_message`, `label_thread`/`unlabel_thread`. Every
+  write tool defaults to the `ask` permission level — a fresh agent can read
+  mail, but nothing mutates the mailbox (and above all nothing sends) without
+  a human approving each call or setting the tool to `allow` in
+  Settings → Tools.
 
 ## Moving parts
 
@@ -30,7 +32,9 @@ module + catalog entry each).
   (refresh + access token, expiry, scopes, connected email) and a `status`
   (`disconnected | connected | error`). `tool_permissions` — one row per
   (user, agent) with `{ [connector]: { [tool]: "deny" | "ask" | "allow" } }`;
-  missing keys mean `allow`. `tool_approvals` — standing "always approve"
+  missing keys mean the tool's catalog default — `allow` for read tools, `ask`
+  for write tools — so a freshly created agent never mutates anything without
+  a human approving each call. `tool_approvals` — standing "always approve"
   overrides, one row per (user, agent, connector, tool, target); `target "*"`
   covers the whole tool (see Human approval below).
 - OAuth (`lib/agent/connectors/google-auth.ts`): authorize-URL builder

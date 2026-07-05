@@ -33,6 +33,7 @@ import { buildNoteTools, notesPrompt } from "./notes";
 import { buildConversationSearchTools, conversationSearchPrompt } from "./conversation-search";
 import { loadSystemPrompt } from "./system-prompt";
 import { nextRunAfter } from "./cron-schedule";
+import { stepsToUIMessageParts } from "./step-ui-messages";
 
 // The job's stored provider/model resolved against the creator's current
 // provider settings, exactly like a chat request. Falls back to the creator's
@@ -85,18 +86,23 @@ async function executeCronJob(
     throw new Error("Job creator is no longer a member of the agent");
   }
 
-  const scope: MemoryScope = {
-    agentId: agent.id,
-    speaker: { id: user.id, name: user.name },
-    members,
-  };
-
   // Job runs respect the agent's chat-memory setting like a normal turn: when
-  // it is off they get no memory prompt, recalled memories, or memory tools.
+  // it is off — or the agent has no memory pool attached — they get no memory
+  // prompt, recalled memories, or memory tools.
+  const scope: MemoryScope | null =
+    agent.chatMemoryEnabled && agent.memoryPoolId
+      ? {
+          agentId: agent.id,
+          poolId: agent.memoryPoolId,
+          speaker: { id: user.id, name: user.name },
+          members,
+        }
+      : null;
+
   const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
     loadSystemPrompt(),
-    agent.chatMemoryEnabled ? buildRelevantMemoriesBlock(scope, job.prompt) : null,
-    agent.chatMemoryEnabled
+    scope ? buildRelevantMemoriesBlock(scope, job.prompt) : null,
+    scope
       ? buildMemorySystemPrompt(scope, {
           sharedConversation: false,
           customPrompt: agent.chatMemoryPrompt,
@@ -164,7 +170,7 @@ async function executeCronJob(
     system,
     prompt: memoriesBlock ? `${memoriesBlock}\n\n${job.prompt}` : job.prompt,
     tools: {
-      ...(agent.chatMemoryEnabled ? buildMemoryTools(scope) : {}),
+      ...(scope ? buildMemoryTools(scope) : {}),
       ...searchTools,
       ...buildDateTools(job.timezone),
       ...buildFileTools(conversation.id),
@@ -179,13 +185,16 @@ async function executeCronJob(
     stopWhen: stepCountIs(8),
   });
 
+  const assistantParts = stepsToUIMessageParts(result.steps);
   await updateMessage(conversation.id, {
     messages: [
       userMessage,
       {
         id: crypto.randomUUID(),
         role: "assistant",
-        parts: [{ type: "text", text: result.text }],
+        parts: assistantParts.length
+          ? assistantParts
+          : [{ type: "text", text: result.text }],
       } satisfies UIMessage,
     ],
   });

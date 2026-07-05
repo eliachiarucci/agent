@@ -79,6 +79,7 @@ async function setupConversation(userName = "Elia") {
   });
   const scope: MemoryScope = {
     agentId: agent.id,
+    poolId: agent.memoryPoolId!,
     speaker: { id: user.id, name: user.name },
     members: [{ userId: user.id, name: user.name, role: "owner" }],
   };

@@ -9,7 +9,7 @@ export async function resetDb(): Promise<void> {
   await db.execute(sql`
     truncate table
       memory_conversations, cron_job_runs, cron_jobs, notes, conversations, memories,
-      agent_members, agents, provider_settings, user_settings, connector_settings,
+      memory_pools, agent_members, agents, provider_settings, user_settings, connector_settings,
       tool_permissions, tool_approvals, session, account,
       verification, two_factor, passkey, users
     cascade
