@@ -321,7 +321,7 @@ export const userSettings = pgTable("user_settings", {
 // from). Each user connects their own account: the OAuth client credentials and
 // the resulting tokens are both per (user, connector).
 
-export const CONNECTOR_TYPES = ["gmail"] as const;
+export const CONNECTOR_TYPES = ["gmail", "google-calendar"] as const;
 export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
 
 // The user's own OAuth client (created in their Google Cloud project). Stored

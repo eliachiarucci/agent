@@ -8,4 +8,4 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
   res.sendStatus(204);
 };
 
-export const { POST, DELETE } = connectorCredentialHandlers("gmail");
+export const { POST, DELETE } = connectorCredentialHandlers("google-calendar");

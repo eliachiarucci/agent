@@ -11,9 +11,11 @@ const scopeSchema = z.object({ agent_id: z.uuid() });
 
 // { [connector]: { [toolName]: "deny" | "ask" | "allow" } } — missing keys mean
 // the tool's catalog default ("allow" for read tools, "ask" for write tools),
-// so the UI only persists tools the user actually changed.
+// so the UI only persists tools the user actually changed. partialRecord:
+// connectors the user never touched may be absent (zod's record over an enum
+// key demands every member).
 const saveSchema = scopeSchema.extend({
-  permissions: z.record(
+  permissions: z.partialRecord(
     z.enum(CONNECTOR_TYPES),
     z.record(z.string(), z.enum(TOOL_PERMISSION_LEVELS))
   ),

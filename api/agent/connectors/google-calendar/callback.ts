@@ -1,5 +1,5 @@
 import express from "express";
-import { connectorAuthorizeHandler } from "../../connectors";
+import { connectorCallbackHandler } from "../../connectors";
 
 export const config = {};
 
@@ -8,4 +8,4 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
   res.sendStatus(204);
 };
 
-export const GET = connectorAuthorizeHandler("gmail");
+export const GET = connectorCallbackHandler("google-calendar");

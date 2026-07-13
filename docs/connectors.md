@@ -1,9 +1,10 @@
-# Connectors (Gmail)
+# Connectors (Gmail, Google Calendar)
 
 Connectors give the agent tools backed by the user's external accounts, in the
-style of Claude's official connectors. Gmail is the first one; Google Calendar
-and Drive are designed to slot in next to it (same OAuth plumbing, one new tool
-module + catalog entry each).
+style of Claude's official connectors. Gmail and Google Calendar exist today;
+Drive is designed to slot in next to them (same OAuth plumbing, one new tool
+module + catalog entry each — see `CONNECTOR_CATALOG` in
+`lib/agent/connectors/index.ts`).
 
 ## Design
 
@@ -16,14 +17,17 @@ module + catalog entry each).
   minutes once) and pastes the client id/secret. The consent screen then looks
   exactly like connecting any app — Google account picker, permission list —
   and tokens are held only by this server.
-- **Writes gated by default.** The Gmail toolset mirrors Claude's official
-  connector surface: `search_threads`, `get_thread`, `list_labels`,
-  `list_drafts`, `create_draft`, `send_email`, `create_label`,
-  `label_message`/`unlabel_message`, `label_thread`/`unlabel_thread`. Every
-  write tool defaults to the `ask` permission level — a fresh agent can read
-  mail, but nothing mutates the mailbox (and above all nothing sends) without
-  a human approving each call or setting the tool to `allow` in
-  Settings → Tools.
+- **Writes gated by default.** The toolsets mirror Claude's official connector
+  surfaces where they have an equivalent. Gmail: `search_threads`,
+  `get_thread`, `list_labels`, `list_drafts`, `create_draft`, `send_email`,
+  `create_label`, `label_message`/`unlabel_message`,
+  `label_thread`/`unlabel_thread`. Google Calendar: `list_calendars`,
+  `list_events`, `get_event`, `find_free_time`, `create_event`,
+  `update_event`, `delete_event`, `respond_to_event`. Every write tool
+  defaults to the `ask` permission level — a fresh agent can read mail and
+  calendars, but nothing mutates anything (and above all nothing sends email
+  or invitations) without a human approving each call or setting the tool to
+  `allow` in Settings → Tools.
 
 ## Moving parts
 
@@ -44,15 +48,22 @@ module + catalog entry each).
   decoded from the `id_token`), and access-token refresh: single-flight per
   user, persisted, `invalid_grant` flips the row to `status="error"` so tools
   are withheld and the UI offers a reconnect.
-- Tools (`lib/agent/connectors/gmail.ts`): plain-`fetch` Gmail REST calls (no
-  googleapis SDK). `get_thread` bodies are parsed for the model: prefer
-  `text/plain`, fall back to html-to-text, normalize whitespace, never inline
-  attached files (an attached `.txt`/`.html` is not the body), and list
+- Tools (`lib/agent/connectors/gmail.ts`, `google-calendar.ts`; shared
+  catalog/permission-filtering helpers in `shared.ts`): plain-`fetch` REST
+  calls (no googleapis SDK). `get_thread` bodies are parsed for the model:
+  prefer `text/plain`, fall back to html-to-text, normalize whitespace, never
+  inline attached files (an attached `.txt`/`.html` is not the body), and list
   attachments/inline images by name+type+size instead of their bytes. An
   off-by-default `raw: true` option returns the original body source (plain
   text as sent + HTML source) when the cleaned text loses something. All
-  bodies are capped (10k chars/message, 40k/thread) to protect local-model
-  context windows. Errors return `{ error }` tool results instead of throwing.
+  bodies are capped (10k chars/message, 40k/thread; 5k/event description) to
+  protect local-model context windows. Errors return `{ error }` tool results
+  instead of throwing. Calendar tools take one time string and route it by
+  shape (bare `YYYY-MM-DD` → all-day `{date}`, otherwise `{dateTime}` with an
+  optional IANA `time_zone`); event writes carry `notify_attendees`
+  (default true → `sendUpdates=all`), and `respond_to_event` patches the
+  user's own attendee entry while sending the list back whole (a PATCH on
+  `attendees` replaces it).
 - Assembly (`lib/agent/connectors/index.ts`): `buildConnectorTools({ userId,
   agentId, interactive, headlessAskPolicy })` returns the tools of every
   *connected* connector filtered by the sender's per-agent permission levels,
@@ -64,10 +75,12 @@ module + catalog entry each).
   unattended for that job only). The prompt/toolset is stable per (user,
   agent, settings), so the KV-cache prefix rule holds.
 - Routes: `GET /agent/connectors` (catalog + masked config; secrets and tokens
-  never leave the server), `POST/DELETE /agent/connectors/gmail` (save
-  credentials / disconnect+revoke), `GET /agent/connectors/gmail/authorize`
-  (302 to Google), `GET /agent/connectors/gmail/callback` (exchange + redirect
-  back to the SPA with `?connector=gmail&connector_status=...`),
+  never leave the server), then per connector (`gmail`, `google-calendar` —
+  thin instantiations of the factories in `api/agent/connectors.ts`):
+  `POST/DELETE /agent/connectors/<id>` (save credentials /
+  disconnect+revoke), `GET /agent/connectors/<id>/authorize` (302 to Google),
+  `GET /agent/connectors/<id>/callback` (exchange + redirect back to the SPA
+  with `?connector=<id>&connector_status=...`),
   `GET/POST /agent/tool-permissions?agent_id=` and
   `GET/DELETE /agent/tool-approvals` (membership-checked).
 - UI (`../agent-ui`, Settings → Tools): agent selector on top (permissions are
@@ -112,10 +125,15 @@ The AI SDK's native tool-approval flow, end to end:
   `streamText`, no model needed at all. Mixed batches (some approved) resume
   the model normally. This path runs before model resolution, so it works even
   with no model configured.
-- **Targets.** Per-tool derivation (`gmail.ts` `gmailApprovalTargets`):
-  `create_draft` → each recipient email (lowercased; one override row per
-  recipient, a call is covered only when *all* recipients are). Tools without a
-  target concept store a single `"*"` row covering every call.
+- **Targets.** Per-tool derivation (each connector's `*ApprovalTargetsFor`):
+  `create_draft`/`send_email` → each recipient email,
+  `create_event`/`update_event` → each attendee email (lowercased; one
+  override row per address, a call is covered only when *all* of them are).
+  Attendee-less calendar writes get a `"(no attendees)"` sentinel target
+  instead of none — an empty list would store a tool-wide `"*"` wildcard, and
+  approving an event that emails nobody must not silently cover future
+  invite-sending calls. Tools without a target concept store a single `"*"`
+  row covering every call.
 - **Interrupted prompts.** If the user sends a new message instead of deciding,
   the route flips pending prompts to `output-denied` ("user sent a new message
   instead") so the model never sees dangling tool calls.
@@ -138,7 +156,7 @@ Errors Google shows on its own pages during consent (observed in the field):
   self-hosted workaround for consumer accounts (Claude's own connectors pass
   because Anthropic's OAuth client is verified). Options: connect a non-APP
   account, unenroll, use a Workspace account whose admin trusts the app, or
-  get the client verified. Calendar scopes are only "sensitive", so a future
+  get the client verified. Calendar scopes are only "sensitive", so the
   Calendar connector works under APP even unverified.
 
 ## Google constraints worth knowing
@@ -150,9 +168,16 @@ Errors Google shows on its own pages during consent (observed in the field):
   gets refresh tokens that expire after 7 days (weekly reconnect). Google
   Workspace users can set the consent screen to **Internal** and avoid both the
   cap and the expiry. `status="error"` + the UI's reconnect button handle the
-  expiry gracefully either way.
-- The OAuth/Gmail endpoints are env-overridable (`GOOGLE_OAUTH_AUTH_URL`,
-  `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_OAUTH_REVOKE_URL`, `GMAIL_API_BASE`) so
-  tests can stub Google locally; unit tests cover the state HMAC, refresh
-  single-flight/invalid_grant, MIME parsing, draft assembly and permission
-  filtering, api tests cover the routes.
+  expiry gracefully either way. Calendar scopes are only "sensitive", so a
+  calendar-only connection does not hit the 7-day expiry.
+- Each connector needs its API enabled in the user's Cloud project (Gmail API /
+  Google Calendar API — the setup wizard links the right one), but one OAuth
+  client can serve all connectors: the authorize URL sends
+  `include_granted_scopes=true`, so consenting to Calendar keeps earlier Gmail
+  grants.
+- The OAuth/API endpoints are env-overridable (`GOOGLE_OAUTH_AUTH_URL`,
+  `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_OAUTH_REVOKE_URL`, `GMAIL_API_BASE`,
+  `GOOGLE_CALENDAR_API_BASE`) so tests can stub Google locally; unit tests
+  cover the state HMAC, refresh single-flight/invalid_grant, MIME parsing,
+  draft assembly, event time routing/shaping and permission filtering, api
+  tests cover the routes.

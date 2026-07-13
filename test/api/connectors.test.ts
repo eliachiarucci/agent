@@ -75,6 +75,51 @@ describe("connectors API", () => {
     expect((await other.post("/agent/connectors/gmail", { clientId: "x" })).status).toBe(400);
   });
 
+  it("lists a google-calendar entry with its own routes and catalog", async () => {
+    const client = new TestClient(BASE);
+    await signUp(client, "Pat");
+
+    const { body } = await client.get("/agent/connectors");
+    const calendar = body.find((c: any) => c.connector === "google-calendar");
+    expect(calendar).toMatchObject({
+      name: "Calendar",
+      status: "disconnected",
+      clientId: null,
+      hasClientSecret: false,
+    });
+    expect(calendar.redirectUri).toContain("/agent/connectors/google-calendar/callback");
+    expect(calendar.tools.map((t: any) => t.name)).toContain("list_events");
+
+    // Credentials are stored per connector: saving calendar leaves gmail alone.
+    const saved = await client.post("/agent/connectors/google-calendar", CREDS);
+    expect(saved.status).toBe(200);
+    expect(saved.body.connector).toBe("google-calendar");
+    const after = await client.get("/agent/connectors");
+    expect(after.body.find((c: any) => c.connector === "gmail").hasClientSecret).toBe(false);
+    expect(
+      after.body.find((c: any) => c.connector === "google-calendar").hasClientSecret
+    ).toBe(true);
+  });
+
+  it("google-calendar authorize redirects to Google with calendar scopes only", async () => {
+    const client = new TestClient(BASE);
+    await signUp(client, "Pat");
+    await client.post("/agent/connectors/google-calendar", CREDS);
+
+    const res = await client.request("/agent/connectors/google-calendar/authorize", {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("location")!);
+    const scope = location.searchParams.get("scope")!;
+    expect(scope).toContain("calendar.readonly");
+    expect(scope).toContain("calendar.events");
+    expect(scope).not.toContain("gmail");
+    expect(location.searchParams.get("redirect_uri")).toContain(
+      "/agent/connectors/google-calendar/callback"
+    );
+  });
+
   it("credentials are per user", async () => {
     const pat = new TestClient(BASE);
     await signUp(pat, "Pat");

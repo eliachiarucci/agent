@@ -1,24 +1,64 @@
 import type { ToolSet } from "ai";
 import { listConnectorSettings } from "../../db/connectors";
 import { getToolPermissions } from "../../db/tool-permissions";
-import type { ConnectorType } from "../../global/schema";
+import {
+  CONNECTOR_TYPES,
+  type ConnectorType,
+  type ToolPermissionLevel,
+} from "../../global/schema";
+import type { ConnectorToolInfo } from "./shared";
 import {
   buildGmailTools,
   GMAIL_SCOPES,
   gmailApprovalTargetsFor,
   gmailPromptFor,
   gmailToolInfo,
-  type ConnectorToolInfo,
 } from "./gmail";
+import {
+  buildGoogleCalendarTools,
+  GOOGLE_CALENDAR_SCOPES,
+  googleCalendarApprovalTargetsFor,
+  googleCalendarPromptFor,
+  googleCalendarToolInfo,
+} from "./google-calendar";
 
-// Everything the settings UI needs to render a connector card: display name,
-// OAuth scopes it will request, and the tool catalog the permission toggles
-// come from. One entry per CONNECTOR_TYPES member.
+// Everything a connector plugs into the app with: what the settings UI needs
+// to render its card (display name, OAuth scopes, the tool catalog the
+// permission toggles come from) plus the runtime hooks (toolset builder,
+// system-prompt section, approval-target derivation). One entry per
+// CONNECTOR_TYPES member — adding a connector is one tool module + one entry.
 export const CONNECTOR_CATALOG: Record<
   ConnectorType,
-  { name: string; scopes: string[]; tools: ConnectorToolInfo[] }
+  {
+    name: string;
+    scopes: string[];
+    tools: ConnectorToolInfo[];
+    buildTools: (
+      userId: string,
+      permissions?: Record<string, ToolPermissionLevel>,
+      approval?: { agentId: string } | "allow"
+    ) => ToolSet;
+    promptFor: (tools: ToolSet) => string;
+    approvalTargetsFor: (toolName: string, input: unknown) => string[] | null;
+  }
 > = {
-  gmail: { name: "Gmail", scopes: GMAIL_SCOPES, tools: gmailToolInfo },
+  gmail: {
+    name: "Gmail",
+    scopes: GMAIL_SCOPES,
+    tools: gmailToolInfo,
+    buildTools: buildGmailTools,
+    promptFor: gmailPromptFor,
+    approvalTargetsFor: gmailApprovalTargetsFor,
+  },
+  // Rendered as "Google Calendar" (the UI prefixes "Google ").
+  "google-calendar": {
+    name: "Calendar",
+    scopes: GOOGLE_CALENDAR_SCOPES,
+    tools: googleCalendarToolInfo,
+    buildTools: buildGoogleCalendarTools,
+    promptFor: googleCalendarPromptFor,
+    approvalTargetsFor: googleCalendarApprovalTargetsFor,
+  },
 };
 
 /** Which connector a tool name belongs to (tool names are unique across connectors). */
@@ -39,10 +79,7 @@ export function connectorApprovalTargets(
   toolName: string,
   input: unknown
 ): string[] | null {
-  switch (connector) {
-    case "gmail":
-      return gmailApprovalTargetsFor(toolName, input);
-  }
+  return CONNECTOR_CATALOG[connector].approvalTargetsFor(toolName, input);
 }
 
 /**
@@ -68,24 +105,23 @@ export async function buildConnectorTools(opts: {
     getToolPermissions(opts.userId, opts.agentId),
   ]);
 
+  const approval = opts.interactive
+    ? { agentId: opts.agentId }
+    : opts.headlessAskPolicy === "allow"
+      ? ("allow" as const)
+      : undefined;
+
   const tools: ToolSet = {};
   const prompts: string[] = [];
 
-  const gmail = connectors.find((c) => c.connector === "gmail");
-  if (gmail?.status === "connected") {
-    const gmailTools = buildGmailTools(
-      opts.userId,
-      permissions.gmail,
-      opts.interactive
-        ? { agentId: opts.agentId }
-        : opts.headlessAskPolicy === "allow"
-          ? "allow"
-          : undefined
-    );
-    if (Object.keys(gmailTools).length > 0) {
-      Object.assign(tools, gmailTools);
-      prompts.push(gmailPromptFor(gmailTools));
-    }
+  for (const connector of CONNECTOR_TYPES) {
+    const row = connectors.find((c) => c.connector === connector);
+    if (row?.status !== "connected") continue;
+    const entry = CONNECTOR_CATALOG[connector];
+    const built = entry.buildTools(opts.userId, permissions[connector], approval);
+    if (Object.keys(built).length === 0) continue;
+    Object.assign(tools, built);
+    prompts.push(entry.promptFor(built));
   }
 
   return { tools, prompt: prompts.join("\n\n") };

@@ -2,7 +2,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { convert } from "html-to-text";
 import { ConnectorAuthError, getConnectorAccessToken } from "./google-auth";
-import { isToolCallApproved } from "../../db/tool-approvals";
+import { filterConnectorTools, read, write, type ConnectorToolInfo } from "./shared";
 import type { ToolPermissionLevel } from "../../global/schema";
 
 // Env-overridable so tests can stub the Gmail API with a local server.
@@ -28,33 +28,8 @@ export const GMAIL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.labels",
 ];
 
-// The permission catalog the settings UI renders toggles from. Names mirror
-// Claude's official Gmail connector so the surface feels familiar.
-// `defaultLevel` is the level applied when the user never saved one — i.e.
-// what a freshly created agent gets: read tools start at "allow", write tools
-// at "ask" so no agent can mutate the mailbox without a human approving each
-// call until its owner explicitly allows it.
-export type ConnectorToolKind = "read" | "write";
-export type ConnectorToolInfo = {
-  name: string;
-  kind: ConnectorToolKind;
-  description: string;
-  defaultLevel: ToolPermissionLevel;
-};
-
-const read = (name: string, description: string): ConnectorToolInfo => ({
-  name,
-  kind: "read",
-  description,
-  defaultLevel: "allow",
-});
-const write = (name: string, description: string): ConnectorToolInfo => ({
-  name,
-  kind: "write",
-  description,
-  defaultLevel: "ask",
-});
-
+// Names mirror Claude's official Gmail connector so the surface feels familiar.
+// Read tools default to "allow", write tools to "ask" (see shared.ts).
 export const gmailToolInfo: ConnectorToolInfo[] = [
   read("search_threads", "Search emails with Gmail query syntax"),
   read("get_thread", "Read a full email thread"),
@@ -542,53 +517,25 @@ export function gmailApprovalTargetsFor(toolName: string, input: unknown): strin
   return gmailApprovalTargets[toolName]?.(input) ?? null;
 }
 
-// The level applied when the user never saved one for a tool: the catalog's
-// defaultLevel ("allow" for reads, "ask" for writes) — the settings UI
-// mirrors this fallback.
-const gmailDefaultLevels: Record<string, ToolPermissionLevel> = Object.fromEntries(
-  gmailToolInfo.map((t) => [t.name, t.defaultLevel])
-);
-
 /**
- * The Gmail toolset for a user, filtered by the per-agent permission map
- * (tool name → level; missing = the tool's catalog default: "allow" for read
- * tools, "ask" for write tools). "ask" tools get a `needsApproval`
- * check: standing (tool, target) approvals let the call run directly, anything
- * else pauses the stream for the user to approve or deny in the UI. Headless
- * runs (no `approval` scope, e.g. cron) withhold "ask" tools like "deny" —
- * a tool the user gated must not run with nobody there to ask — unless the
- * caller passes `"allow"` (a cron job whose creator opted its "ask" tools in).
+ * The Gmail toolset for a user, filtered by the per-agent permission map —
+ * catalog defaults, "ask" gating and headless behavior per
+ * `filterConnectorTools` (shared.ts).
  */
 export function buildGmailTools(
   userId: string,
   permissions?: Record<string, ToolPermissionLevel>,
   approval?: { agentId: string } | "allow"
 ): ToolSet {
-  const tools = allGmailTools(userId);
-  return Object.fromEntries(
-    Object.entries(tools).flatMap(([name, definition]) => {
-      const level = permissions?.[name] ?? gmailDefaultLevels[name] ?? "allow";
-      if (level === "allow") return [[name, definition]];
-      if (level !== "ask" || !approval) return [];
-      if (approval === "allow") return [[name, definition]];
-      return [
-        [
-          name,
-          {
-            ...definition,
-            needsApproval: async (input: unknown) =>
-              !(await isToolCallApproved({
-                userId,
-                agentId: approval.agentId,
-                connector: "gmail",
-                tool: name,
-                targets: gmailApprovalTargetsFor(name, input),
-              })),
-          },
-        ],
-      ];
-    })
-  );
+  return filterConnectorTools({
+    connector: "gmail",
+    userId,
+    tools: allGmailTools(userId),
+    toolInfo: gmailToolInfo,
+    permissions,
+    approval,
+    targetsFor: gmailApprovalTargetsFor,
+  });
 }
 
 // The Gmail system-prompt section, phrased for the toolset actually offered:
