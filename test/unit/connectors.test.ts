@@ -16,6 +16,7 @@ import {
 import { buildConnectorTools } from "../../lib/agent/connectors";
 import {
   getConnectorSetting,
+  setConnectorEnabled,
   setConnectorTokens,
   upsertConnectorSetting,
 } from "../../lib/db/connectors";
@@ -523,6 +524,24 @@ describe("buildConnectorTools", () => {
     expect(Object.keys(full.tools)).toHaveLength(
       gmailToolInfo.filter((t) => t.kind === "read").length
     );
+  });
+
+  it("withholds a disabled connector entirely — tools and prompt — until re-enabled", async () => {
+    const { user, agent } = await connectedUser();
+
+    await setConnectorEnabled(user.id, "gmail", false);
+    const off = await buildConnectorTools({ userId: user.id, agentId: agent.id, interactive: true });
+    expect(Object.keys(off.tools)).toHaveLength(0);
+    expect(off.prompt).toBe("");
+    // The connection itself is untouched: still connected, tokens kept.
+    const row = await getConnectorSetting(user.id, "gmail");
+    expect(row?.status).toBe("connected");
+    expect(row?.tokens?.refreshToken).toBe("refresh-1");
+
+    await setConnectorEnabled(user.id, "gmail", true);
+    const on = await buildConnectorTools({ userId: user.id, agentId: agent.id, interactive: true });
+    expect(on.tools.search_threads).toBeDefined();
+    expect(on.prompt).toContain("## Gmail");
   });
 
   it("withholds the prompt when every tool is denied", async () => {

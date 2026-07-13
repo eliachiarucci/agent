@@ -116,7 +116,11 @@ export async function buildConnectorTools(opts: {
 
   for (const connector of CONNECTOR_TYPES) {
     const row = connectors.find((c) => c.connector === connector);
-    if (row?.status !== "connected") continue;
+    // Disabled (the card's switch) withholds the connector entirely, tools and
+    // prompt section both. Like any settings change this moves the prompt
+    // prefix once, on the first turn after the flip; between flips the
+    // assembly is deterministic, so the KV cache stays warm.
+    if (row?.status !== "connected" || !row.enabled) continue;
     const entry = CONNECTOR_CATALOG[connector];
     const built = entry.buildTools(opts.userId, permissions[connector], approval);
     if (Object.keys(built).length === 0) continue;

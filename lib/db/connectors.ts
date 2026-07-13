@@ -65,6 +65,25 @@ export async function setConnectorTokens(
     .where(and(eq(connectorSettings.userId, userId), eq(connectorSettings.connector, connector)));
 }
 
+/**
+ * The card's on/off switch. Only configured connectors can be toggled (there
+ * is nothing to disable otherwise): returns the updated row, or undefined when
+ * no row exists. Credentials and tokens are untouched, so re-enabling needs no
+ * reconnect.
+ */
+export async function setConnectorEnabled(
+  userId: string,
+  connector: ConnectorType,
+  enabled: boolean
+): Promise<ConnectorSetting | undefined> {
+  const rows = await db
+    .update(connectorSettings)
+    .set({ enabled, updatedAt: sql`now()` })
+    .where(and(eq(connectorSettings.userId, userId), eq(connectorSettings.connector, connector)))
+    .returning();
+  return rows[0];
+}
+
 export async function setConnectorStatus(
   userId: string,
   connector: ConnectorType,

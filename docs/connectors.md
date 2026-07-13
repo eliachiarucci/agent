@@ -33,8 +33,9 @@ module + catalog entry each — see `CONNECTOR_CATALOG` in
 
 - Schema (`lib/global/schema.ts`): `connector_settings` — one row per
   (user, connector) holding `settings` (clientId/clientSecret), `tokens`
-  (refresh + access token, expiry, scopes, connected email) and a `status`
-  (`disconnected | connected | error`). `tool_permissions` — one row per
+  (refresh + access token, expiry, scopes, connected email), a `status`
+  (`disconnected | connected | error`) and `enabled` (the card's on/off
+  switch, default true — see Enable/disable below). `tool_permissions` — one row per
   (user, agent) with `{ [connector]: { [tool]: "deny" | "ask" | "allow" } }`;
   missing keys mean the tool's catalog default — `allow` for read tools, `ask`
   for write tools — so a freshly created agent never mutates anything without
@@ -77,19 +78,43 @@ module + catalog entry each — see `CONNECTOR_CATALOG` in
 - Routes: `GET /agent/connectors` (catalog + masked config; secrets and tokens
   never leave the server), then per connector (`gmail`, `google-calendar` —
   thin instantiations of the factories in `api/agent/connectors.ts`):
-  `POST/DELETE /agent/connectors/<id>` (save credentials /
-  disconnect+revoke), `GET /agent/connectors/<id>/authorize` (302 to Google),
+  `POST/PATCH/DELETE /agent/connectors/<id>` (save credentials / toggle
+  `enabled` / disconnect+revoke), `GET /agent/connectors/<id>/authorize` (302
+  to Google),
   `GET /agent/connectors/<id>/callback` (exchange + redirect back to the SPA
   with `?connector=<id>&connector_status=...`),
   `GET/POST /agent/tool-permissions?agent_id=` and
   `GET/DELETE /agent/tool-approvals` (membership-checked).
 - UI (`../agent-ui`, Settings → Tools): agent selector on top (permissions are
   per agent), then a collapsible card per connector with the setup wizard
-  (links, copyable redirect URI, credential form) and — once connected — a
+  (links, copyable redirect URI, credential form) and — once connected — an
+  on/off switch in the card header (before the expand chevron) plus a
   Deny / Ask / Allow control per tool, grouped read/write. The OAuth callback
   lands back in the SPA, which toasts and reopens Settings → Tools. An
   "Approval overrides" dialog lists the stored always-approve combinations and
   lets the user revoke them.
+
+## Enable/disable (the card's switch)
+
+Each connected connector card has an on/off switch: off keeps the credentials,
+tokens and per-agent permission levels exactly as they are but withholds the
+connector completely — `buildConnectorTools` skips it, so neither its tools
+nor its system-prompt section reach the model, in chat and cron alike.
+Re-enabling needs no reconnect. `PATCH /agent/connectors/<id>` with
+`{ enabled }`; 404 until credentials are stored (nothing to disable). It is
+per user, like the connection itself — every agent the user talks to is
+affected.
+
+KV-cache note: really removing a tool necessarily changes the request prefix
+(the tools block and the prompt section), so the first turn after a flip runs
+cold — same class of event as changing a tool permission or connecting a new
+connector. The design keeps that cost to exactly one invalidation: the flag is
+read per turn (never mid-turn), connectors are assembled in fixed
+`CONNECTOR_TYPES` order with everything else byte-identical, and between flips
+the prefix is stable again. Withholding is deliberately *not* done by stubbing
+the tools out (which would preserve the cache but leave the tool names and
+descriptions visible to the model): off means the model cannot see or call the
+connector at all.
 
 ## Human approval ("ask" tools)
 

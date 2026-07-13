@@ -359,6 +359,10 @@ export const connectorSettings = pgTable(
     settings: jsonb("settings").notNull().$type<ConnectorSettingsValue>(),
     tokens: jsonb("tokens").$type<ConnectorTokens | null>(),
     status: text("status").$type<ConnectorStatus>().notNull().default("disconnected"),
+    // The card's on/off switch: off withholds every tool of the connector
+    // while keeping credentials and tokens, so re-enabling needs no reconnect.
+    // Orthogonal to `status` (whether the OAuth connection works).
+    enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },

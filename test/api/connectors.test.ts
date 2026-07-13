@@ -16,6 +16,7 @@ describe("connectors API", () => {
     const client = new TestClient(BASE);
     expect((await client.get("/agent/connectors")).status).toBe(401);
     expect((await client.post("/agent/connectors/gmail", CREDS)).status).toBe(401);
+    expect((await client.patch("/agent/connectors/gmail", { enabled: false })).status).toBe(401);
     expect((await client.delete("/agent/connectors/gmail")).status).toBe(401);
     const authorize = await client.request("/agent/connectors/gmail/authorize", {
       redirect: "manual",
@@ -188,6 +189,34 @@ describe("connectors API", () => {
     expect(new URL(denied.headers.get("location")!).searchParams.get("connector_error")).toBe(
       "Access was denied"
     );
+  });
+
+  it("toggles enabled without touching credentials, only for configured connectors", async () => {
+    const client = new TestClient(BASE);
+    await signUp(client, "Pat");
+
+    // Nothing stored yet: there is nothing to disable.
+    expect((await client.patch("/agent/connectors/gmail", { enabled: false })).status).toBe(404);
+
+    await client.post("/agent/connectors/gmail", CREDS);
+    expect((await client.patch("/agent/connectors/gmail", { enabled: "no" })).status).toBe(400);
+
+    const off = await client.patch("/agent/connectors/gmail", { enabled: false });
+    expect(off.status).toBe(200);
+    expect(off.body).toMatchObject({
+      connector: "gmail",
+      enabled: false,
+      clientId: CREDS.clientId,
+      hasClientSecret: true,
+    });
+
+    // The list reflects it; the other connector is untouched (and defaults on).
+    const { body } = await client.get("/agent/connectors");
+    expect(body.find((c: any) => c.connector === "gmail").enabled).toBe(false);
+    expect(body.find((c: any) => c.connector === "google-calendar").enabled).toBe(true);
+
+    const on = await client.patch("/agent/connectors/gmail", { enabled: true });
+    expect(on.body.enabled).toBe(true);
   });
 
   it("delete removes the configuration", async () => {

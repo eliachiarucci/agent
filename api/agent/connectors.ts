@@ -14,6 +14,7 @@ import {
   deleteConnectorSetting,
   getConnectorSetting,
   listConnectorSettings,
+  setConnectorEnabled,
   setConnectorTokens,
   upsertConnectorSetting,
   withStoredClientSecret,
@@ -37,6 +38,7 @@ export function maskConnectorSetting(connector: ConnectorType, row?: ConnectorSe
     clientId: row?.settings.clientId ?? null,
     hasClientSecret: Boolean(row?.settings.clientSecret),
     status: row?.status ?? "disconnected",
+    enabled: row?.enabled ?? true,
     email: row?.tokens?.email ?? null,
     updatedAt: row?.updatedAt ?? null,
   };
@@ -73,15 +75,19 @@ const credentialsSchema = z.object({
   clientSecret: z.string().min(1),
 });
 
+const toggleSchema = z.object({ enabled: z.boolean() });
+
 /**
- * POST (store the user's own Google OAuth client) and DELETE (disconnect and
- * forget) for one connector. The UI omits the secret when one is already
- * stored (it is masked on GET), so restore it before validating. Changing the
- * clientId resets any existing connection — tokens are bound to the client
- * that issued them (lib/db/connectors.ts).
+ * POST (store the user's own Google OAuth client), PATCH (the card's on/off
+ * switch — withholds the connector's tools while keeping credentials and
+ * tokens) and DELETE (disconnect and forget) for one connector. The UI omits
+ * the secret when one is already stored (it is masked on GET), so restore it
+ * before validating. Changing the clientId resets any existing connection —
+ * tokens are bound to the client that issued them (lib/db/connectors.ts).
  */
 export function connectorCredentialHandlers(connector: ConnectorType): {
   POST: express.RequestHandler;
+  PATCH: express.RequestHandler;
   DELETE: express.RequestHandler;
 } {
   return {
@@ -100,6 +106,29 @@ export function connectorCredentialHandlers(connector: ConnectorType): {
       }
 
       const row = await upsertConnectorSetting(user.id, connector, parsed.data);
+      res.json(maskConnectorSetting(connector, row));
+    },
+
+    PATCH: async (req, res) => {
+      const user = await getSessionUser(req);
+      if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return;
+      }
+
+      const parsed = toggleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues });
+        return;
+      }
+
+      // Only configured connectors can be toggled — with no row there is
+      // nothing to disable.
+      const row = await setConnectorEnabled(user.id, connector, parsed.data.enabled);
+      if (!row) {
+        res.status(404).json({ error: "Connector not configured" });
+        return;
+      }
       res.json(maskConnectorSetting(connector, row));
     },
 
