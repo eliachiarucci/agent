@@ -48,7 +48,10 @@ module + catalog entry each — see `CONNECTOR_CATALOG` in
   callback to the user who started the flow, code exchange (connected email
   decoded from the `id_token`), and access-token refresh: single-flight per
   user, persisted, `invalid_grant` flips the row to `status="error"` so tools
-  are withheld and the UI offers a reconnect.
+  are withheld and the UI offers a reconnect. Each connector has its own
+  redirect URI (`/agent/connectors/<id>/callback`), so an OAuth client reused
+  across connectors needs every connector's URI on its authorized list — the
+  setup wizard says so and shows the URI to copy.
 - Tools (`lib/agent/connectors/gmail.ts`, `google-calendar.ts`; shared
   catalog/permission-filtering helpers in `shared.ts`): plain-`fetch` REST
   calls (no googleapis SDK). `get_thread` bodies are parsed for the model:
@@ -80,9 +83,8 @@ module + catalog entry each — see `CONNECTOR_CATALOG` in
   thin instantiations of the factories in `api/agent/connectors.ts`):
   `POST/PATCH/DELETE /agent/connectors/<id>` (save credentials / toggle
   `enabled` / disconnect+revoke), `GET /agent/connectors/<id>/authorize` (302
-  to Google),
-  `GET /agent/connectors/<id>/callback` (exchange + redirect back to the SPA
-  with `?connector=<id>&connector_status=...`),
+  to Google), `GET /agent/connectors/<id>/callback` (exchange + redirect back
+  to the SPA with `?connector=<id>&connector_status=...`),
   `GET/POST /agent/tool-permissions?agent_id=` and
   `GET/DELETE /agent/tool-approvals` (membership-checked).
 - UI (`../agent-ui`, Settings → Tools): agent selector on top (permissions are
@@ -173,6 +175,14 @@ Errors Google shows on its own pages during consent (observed in the field):
   Auth Platform → Audience → Test users. Do *not* publish to production
   instead: unverified production apps are hard-blocked for Gmail's restricted
   scopes.
+- **`Error 400: redirect_uri_mismatch`**: the redirect URI the app sent is not
+  registered on the OAuth client. Every connector has its own callback URI, so
+  this typically happens when reusing the client set up for another connector
+  (e.g. Gmail's client for Calendar): copy the exact URI from the connector
+  card's wizard and add it under the client's Authorized redirect URIs
+  (Credentials → the web client — a client can hold several). Google can take
+  a few minutes to propagate the change. Also triggered by an `APP_ORIGIN`
+  that doesn't match how the app is actually reached (scheme/host/port).
 - **"Google hasn't verified this app" interstitial**: expected for test users
   of an app in Testing status — click Continue.
 - **`Error 400: policy_enforced` — "not approved by Advanced Protection"**:
@@ -196,10 +206,11 @@ Errors Google shows on its own pages during consent (observed in the field):
   expiry gracefully either way. Calendar scopes are only "sensitive", so a
   calendar-only connection does not hit the 7-day expiry.
 - Each connector needs its API enabled in the user's Cloud project (Gmail API /
-  Google Calendar API — the setup wizard links the right one), but one OAuth
-  client can serve all connectors: the authorize URL sends
-  `include_granted_scopes=true`, so consenting to Calendar keeps earlier Gmail
-  grants.
+  Google Calendar API — the setup wizard links the right one), and one OAuth
+  client can serve all connectors as long as **each connector's redirect URI is
+  registered on it** (they differ per connector; the wizard shows the one to
+  add). The authorize URL sends `include_granted_scopes=true`, so consenting
+  to Calendar keeps earlier Gmail grants.
 - The OAuth/API endpoints are env-overridable (`GOOGLE_OAUTH_AUTH_URL`,
   `GOOGLE_OAUTH_TOKEN_URL`, `GOOGLE_OAUTH_REVOKE_URL`, `GMAIL_API_BASE`,
   `GOOGLE_CALENDAR_API_BASE`) so tests can stub Google locally; unit tests

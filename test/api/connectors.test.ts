@@ -88,6 +88,7 @@ describe("connectors API", () => {
       clientId: null,
       hasClientSecret: false,
     });
+    // Each connector has its own callback URL — a reused OAuth client needs both.
     expect(calendar.redirectUri).toContain("/agent/connectors/google-calendar/callback");
     expect(calendar.tools.map((t: any) => t.name)).toContain("list_events");
 

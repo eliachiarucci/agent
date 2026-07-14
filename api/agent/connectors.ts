@@ -33,7 +33,8 @@ export function maskConnectorSetting(connector: ConnectorType, row?: ConnectorSe
     name: catalog.name,
     scopes: catalog.scopes,
     tools: catalog.tools,
-    // What the wizard tells the user to register on their OAuth client.
+    // What the wizard tells the user to register on their OAuth client. Per
+    // connector: a client reused across connectors needs each one's URI added.
     redirectUri: connectorRedirectUri(connector),
     clientId: row?.settings.clientId ?? null,
     hasClientSecret: Boolean(row?.settings.clientSecret),

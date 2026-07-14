@@ -22,8 +22,11 @@ const EXPIRY_SLACK_MS = 60_000;
 // The consent redirect should be used promptly; stale states are rejected.
 const STATE_TTL_MS = 10 * 60_000;
 
-// Google requires HTTPS redirect URIs (localhost excepted), so connecting a
-// Google account needs the app served over HTTPS or accessed via localhost.
+// Each connector has its own callback URL, so an OAuth client reused across
+// connectors needs every connector's redirect URI on its authorized list (the
+// card's setup wizard says so, with a copy field). Google requires HTTPS
+// redirect URIs (localhost excepted), so connecting a Google account needs the
+// app served over HTTPS or accessed via localhost.
 export function connectorRedirectUri(connector: ConnectorType): string {
   const origin = process.env.APP_ORIGIN ?? "http://localhost:5173";
   return `${origin.replace(/\/+$/, "")}/agent/connectors/${connector}/callback`;
@@ -144,6 +147,7 @@ export async function exchangeCode(opts: {
     code: opts.code,
     client_id: opts.clientId,
     client_secret: opts.clientSecret,
+    // Must match the authorize request's redirect_uri exactly.
     redirect_uri: connectorRedirectUri(opts.connector),
   });
   if (!body.access_token || !body.refresh_token) {
