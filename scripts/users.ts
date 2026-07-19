@@ -10,17 +10,19 @@ import { createInterface } from "node:readline/promises";
 
 const { auth } = await import("../lib/global/auth");
 const { db } = await import("../lib/global/db");
-const { agents, agentMembers, users } = await import("../lib/global/schema");
+const { agents, agentMembers, users, session } = await import("../lib/global/schema");
 
 const USAGE = `Manage user accounts (public signup is disabled).
 
 Usage:
   npm run users -- list
   npm run users -- create <username> --name "Full Name" [--email addr]
+  npm run users -- set-password <username>
   npm run users -- remove <username> [--yes]
 
-create prompts for the password. --email defaults to <username>@agent.local
-(no verification emails are sent). remove also deletes every agent the user
+create and set-password prompt for the password. --email defaults to
+<username>@agent.local (no verification emails are sent). set-password also
+signs the user out everywhere. remove also deletes every agent the user
 owns, including its memories and conversations — shared members lose access.`;
 
 function fail(message: string): never {
@@ -102,6 +104,22 @@ async function create(username: string, name: string | undefined, email: string 
   console.log(`Created user ${user.name} (@${username}, ${user.email}).`);
 }
 
+async function setPassword(username: string) {
+  const user = await db.query.users.findFirst({ where: eq(users.username, username) });
+  if (!user) fail(`No user with username "${username}".`);
+
+  const password = await promptHidden("New password: ");
+  if (password.length < 8) fail("Password must be at least 8 characters.");
+  if (password !== (await promptHidden("Confirm password: "))) fail("Passwords do not match.");
+
+  // Same hash + credential-account update the admin plugin's set-password
+  // route performs; signup is disabled so there is no public reset flow.
+  const ctx = await auth.$context;
+  await ctx.internalAdapter.updatePassword(user.id, await ctx.password.hash(password));
+  await db.delete(session).where(eq(session.userId, user.id));
+  console.log(`Password updated for @${username}; existing sessions signed out.`);
+}
+
 async function remove(username: string, skipConfirm: boolean) {
   const user = await db.query.users.findFirst({ where: eq(users.username, username) });
   if (!user) fail(`No user with username "${username}".`);
@@ -146,6 +164,8 @@ try {
     await list();
   } else if (command === "create" && username) {
     await create(username, values.name, values.email);
+  } else if (command === "set-password" && username) {
+    await setPassword(username);
   } else if (command === "remove" && username) {
     await remove(username, values.yes);
   } else {
