@@ -1,14 +1,19 @@
-# Conversation files (artifacts)
+# Conversation files (artifacts and uploads)
 
 Agents can write files — documents, code, plans — that persist beyond the chat
-stream and that users can download from the UI's Files view.
+stream and that users can download from the UI's Files view. Users can attach
+files the other way: long pasted text and chat images upload into the same
+per-conversation workspace.
 
 ## Storage model
 
-Files live on disk, not in Postgres. The layout is one folder per conversation:
+Files live on disk, not in Postgres. The layout is one folder per conversation,
+with user uploads in an `uploads/` subfolder (`FileSource`: `"agent"` vs
+`"upload"` — same name in both sources means two distinct files):
 
 ```
-$FILES_DIR/<conversation id>/<file name>
+$FILES_DIR/<conversation id>/<file name>            # agent-written artifacts
+$FILES_DIR/<conversation id>/uploads/<file name>    # user uploads (images, pasted text)
 ```
 
 - `FILES_DIR` defaults to `data/files` in dev (gitignored); deployments mount a
@@ -43,26 +48,60 @@ prompt prefix stays KV-cache friendly (see [memory.md](memory.md)).
 | `presentFile` | Open a file in the UI's viewer panel. The tool only verifies the file exists; the UI watches the message stream for the tool call and opens the viewer. |
 
 Tool failures are returned as `{ error }` values so the model can self-correct.
+`readFile` looks in the agent folder first, then falls back to `uploads/` (the
+`<attached-files>` flow stores attachments there).
 
 Guardrails: file names are plain names (no slashes, traversal, control chars,
-max 128 chars — `isValidFileName`), content is capped at 1 MiB, and a
-conversation holds at most 100 files.
+max 128 chars — `isValidFileName`), tool-written content is capped at 1 MiB,
+uploads at 10 MiB (`MAX_UPLOAD_BYTES`), and a conversation holds at most 100
+files across both sources.
 
 ## HTTP API
 
 - `GET /agent/files?agent_id=` — flat list of every file in the agent's
   conversations visible to the viewer:
-  `[{ conversationId, name, size, updatedAt }]`, newest first. `agent_id`
-  defaults to the user's oldest agent, like the other routes.
-- `GET /agent/files/download?conversation_id=&name=` — streams the file with
-  `Content-Disposition: attachment` (so browsers download instead of rendering
-  HTML on the app origin). Access-checked like reading the conversation.
-- `GET /agent/files/content?conversation_id=&name=` — the file as JSON
-  (`{ name, content, size, updatedAt }`) for the viewer panel, same access
-  rules (shared logic: `resolveConversationViewer` in `lib/agent/actor.ts`).
+  `[{ conversationId, name, size, updatedAt, source }]`, newest first.
+  `agent_id` defaults to the user's oldest agent, like the other routes.
+- `POST /agent/files?conversation_id=&name=` — upload raw bytes (any non-JSON
+  content type; the body is the file verbatim) into the conversation's
+  `uploads/` folder. Works for a not-yet-created conversation id (the client
+  generates it; the first message creates the row). 201 with the stored entry.
+- `DELETE /agent/files?conversation_id=&name=` — remove one upload (e.g. an
+  image detached in the composer before sending). Only uploads are deletable.
+- `GET /agent/files/download?conversation_id=&name=&source=` — streams the file
+  with `Content-Disposition: attachment` (so browsers download instead of
+  rendering HTML on the app origin). Access-checked like reading the
+  conversation. `source` defaults to `agent`; pass `upload` for uploads.
+- `GET /agent/files/content?conversation_id=&name=&source=` — the file as JSON
+  (`{ name, content, size, updatedAt }`, utf8 text) for the viewer panel, same
+  access rules (shared logic: `resolveConversationViewer` in
+  `lib/agent/actor.ts`). Images render via the download route instead.
 
 The UI (`../agent-ui`) shows these in the sidebar's Files dialog
-(`src/components/files/files-dialog.tsx`) as one flat list with download links.
+(`src/components/files/files-dialog.tsx`) as two folders — agent files and
+uploaded files — each a flat list with view/download links.
+
+## Chat images
+
+The composer's attach button (shown unless `/agent/context` reports
+`supportsImages: false` for the selected model) opens the native picker
+filtered to PNG/JPEG/WebP/GIF (`IMAGE_MEDIA_TYPES`, mirrored in the UI). Each
+picked image uploads immediately to the conversation's `uploads/` folder under
+a uniquified name (re-using a name would overwrite the upload an earlier
+message references); square previews sit above the input, removable (which
+deletes the upload) until sent, up to 20 per message.
+
+On send, the request carries `images: [{ name }]` and the route stores real AI
+SDK file parts on the user message
+(`{ type: "file", mediaType, filename, url }`, built in
+`lib/agent/image-parts.ts`), with `url` pointing at the app's own download
+route so the UI can render thumbnails with the session cookie. Providers can't
+fetch that URL, so right before `convertToModelMessages` the model's copy of
+the history swaps each part's URL for a `data:` URL read from disk
+(`inlineImageFileParts`); a missing upload degrades to a text note. The base64
+payload is deterministic, so the prompt prefix stays KV-cache stable across
+turns. Compaction transcripts keep an `[attached image: name]` trace; memory
+extraction and retrieval ignore file parts.
 
 ## File viewer (presentFile)
 
@@ -88,7 +127,11 @@ also gets a manual "View" button (via `FileViewerContext`).
 
 ## Testing
 
-- `test/unit/files.test.ts` — storage helpers against a temp `FILES_DIR`.
-- `test/api/files.test.ts` — list/download visibility over HTTP. Test servers
-  get `FILES_DIR=dist/test-files-<port>` (wiped on server start); tests seed
-  conversations in the DB and files on disk via the same helpers.
+- `test/unit/files.test.ts` — storage helpers against a temp `FILES_DIR`
+  (both sources, media types, upload deletion).
+- `test/unit/image-parts.test.ts` — file-part building and data-URL inlining.
+- `test/api/files.test.ts` — list/upload/download/delete visibility over HTTP.
+  Test servers get `FILES_DIR=dist/test-files-<port>` (wiped on server start);
+  tests seed conversations in the DB and files on disk via the same helpers.
+- `test/api/chat-images.test.ts` — the chat route's image handling (file parts
+  persist before streaming, so no model is needed).

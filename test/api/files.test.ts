@@ -5,7 +5,12 @@ import { TestClient } from "../helpers/client";
 import { signUp, type TestUser } from "../helpers/auth";
 import { closeDb, resetDb } from "../helpers/db";
 import { createMessage } from "../../lib/db/conversations";
-import { readConversationFile, writeConversationFile } from "../../lib/agent/files";
+import {
+  readConversationFile,
+  statConversationFile,
+  writeConversationFile,
+  writeConversationFileBytes,
+} from "../../lib/agent/files";
 
 const BASE = serverUrl("api");
 
@@ -63,6 +68,7 @@ describe("GET /agent/files", () => {
       name: expect.any(String),
       size: 1,
       updatedAt: expect.any(String),
+      source: "agent",
     });
 
     const memberSees = await member.get(`/agent/files?agent_id=${agentId}`);
@@ -107,13 +113,14 @@ describe("POST /agent/files", () => {
       conversationId: newId,
       name: "pasted-content-1.txt",
       size: 5,
+      source: "upload",
     });
-    expect(await readConversationFile(newId, "pasted-content-1.txt")).toBe("hello");
+    expect(await readConversationFile(newId, "pasted-content-1.txt", "upload")).toBe("hello");
 
     const conv = await createMessage({ agentId, userId: ownerUser.id, shared: false, messages: [] });
     const existRes = await upload(owner, conv.id, "note.txt", "world");
     expect(existRes.status).toBe(201);
-    expect(await readConversationFile(conv.id, "note.txt")).toBe("world");
+    expect(await readConversationFile(conv.id, "note.txt", "upload")).toBe("world");
   });
 
   it("enforces auth and conversation access, and validates the request", async () => {
@@ -135,6 +142,71 @@ describe("POST /agent/files", () => {
     // Traversal names and empty bodies are 400.
     expect((await upload(owner, ownerPrivate.id, "../escape.txt", "x")).status).toBe(400);
     expect((await upload(owner, ownerPrivate.id, "ok.txt", "")).status).toBe(400);
+  });
+});
+
+describe("uploads (source=upload)", () => {
+  it("lists uploads next to agent files, download/content address them by source", async () => {
+    const { owner, ownerUser, agentId } = await scenario();
+    const conv = await seedConversationWithFile(agentId, ownerUser, false, "notes.md", "agent");
+    await writeConversationFileBytes(conv.id, "photo.png", Buffer.from("img"), 1024, "upload");
+
+    const list = await owner.get(`/agent/files?agent_id=${agentId}`);
+    expect(list.body.map((f: any) => `${f.source}/${f.name}`).sort()).toEqual([
+      "agent/notes.md",
+      "upload/photo.png",
+    ]);
+
+    const download = await owner.request(
+      `/agent/files/download?conversation_id=${conv.id}&name=photo.png&source=upload`
+    );
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe("img");
+    // Without the source param the lookup misses: uploads are not agent files.
+    expect(
+      (await owner.get(`/agent/files/download?conversation_id=${conv.id}&name=photo.png`)).status
+    ).toBe(404);
+
+    const content = await owner.get(
+      `/agent/files/content?conversation_id=${conv.id}&name=photo.png&source=upload`
+    );
+    expect(content.status).toBe(200);
+    expect(content.body).toMatchObject({ name: "photo.png", content: "img" });
+  });
+
+  it("DELETE removes one upload for anyone with conversation access", async () => {
+    const { owner, member, ownerUser, agentId } = await scenario();
+    const conv = await createMessage({
+      agentId,
+      userId: ownerUser.id,
+      shared: false,
+      messages: [],
+    });
+    await writeConversationFileBytes(conv.id, "photo.png", Buffer.from("img"), 1024, "upload");
+
+    // A member of the agent can't touch someone else's private chat; anonymous
+    // users can't touch anything.
+    expect(
+      (await member.delete(`/agent/files?conversation_id=${conv.id}&name=photo.png`)).status
+    ).toBe(403);
+    const anonymous = new TestClient(BASE);
+    expect(
+      (await anonymous.delete(`/agent/files?conversation_id=${conv.id}&name=photo.png`)).status
+    ).toBe(401);
+
+    const res = await owner.delete(`/agent/files?conversation_id=${conv.id}&name=photo.png`);
+    expect(res.status).toBe(204);
+    expect(await statConversationFile(conv.id, "photo.png", "upload")).toBeNull();
+
+    // Gone now — and agent-written artifacts are never deletable through here.
+    expect(
+      (await owner.delete(`/agent/files?conversation_id=${conv.id}&name=photo.png`)).status
+    ).toBe(404);
+    await writeConversationFile(conv.id, "artifact.md", "keep");
+    expect(
+      (await owner.delete(`/agent/files?conversation_id=${conv.id}&name=artifact.md`)).status
+    ).toBe(404);
+    expect(await readConversationFile(conv.id, "artifact.md")).toBe("keep");
   });
 });
 

@@ -2,6 +2,7 @@ import express from 'express';
 import { z } from "zod";
 import { resolveConversationViewer } from "../../../lib/agent/actor";
 import {
+    FILE_SOURCES,
     isValidFileName,
     readConversationFile,
     statConversationFile,
@@ -17,6 +18,9 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
 const querySchema = z.object({
     conversation_id: z.uuid(),
     name: z.string().min(1),
+    // Which folder the file lives in: agent-written artifacts (default) or
+    // user uploads (chat images, pasted attachments).
+    source: z.enum(FILE_SOURCES).default("agent"),
 });
 
 // File content as JSON, for the UI's file viewer. The viewer polls this while
@@ -28,7 +32,7 @@ export const GET: express.RequestHandler = async (req, res) => {
         res.status(400).json({ error: parsed.error.issues });
         return;
     }
-    const { conversation_id, name } = parsed.data;
+    const { conversation_id, name, source } = parsed.data;
 
     if (!isValidFileName(name)) {
         res.status(400).json({ error: "Invalid file name" });
@@ -43,8 +47,8 @@ export const GET: express.RequestHandler = async (req, res) => {
 
     // Stat first, then read: updatedAt must not be newer than the content it
     // describes, or the viewer would skip the next change.
-    const file = await statConversationFile(conversation_id, name);
-    const content = file && (await readConversationFile(conversation_id, name));
+    const file = await statConversationFile(conversation_id, name, source);
+    const content = file && (await readConversationFile(conversation_id, name, source));
     if (!file || content === null) {
         res.status(404).json({ error: "File not found" });
         return;

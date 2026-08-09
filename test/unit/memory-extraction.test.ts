@@ -30,7 +30,11 @@ vi.mock("ai", async (importOriginal) => {
 // Keep compaction's window lookup off the network (it would otherwise hit LM
 // Studio); a large window means our tiny fixtures never trip compaction.
 vi.mock("../../lib/agent/context", () => ({
-  getContextWindow: vi.fn(async () => ({ model: "test", contextLength: 32768 })),
+  getContextWindow: vi.fn(async () => ({
+    model: "test",
+    contextLength: 32768,
+    supportsImages: null,
+  })),
 }));
 
 import {

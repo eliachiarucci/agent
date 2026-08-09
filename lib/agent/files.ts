@@ -8,7 +8,38 @@ import { join, resolve } from "node:path";
 // one folder. Nothing is duplicated into Postgres: visibility derives from the
 // conversation the folder belongs to (whoever can read the conversation can
 // read its files), and the folder is removed together with the conversation.
+// Files the user uploads (images, pasted content) live in an "uploads/"
+// subfolder of the conversation's folder, so agent-written artifacts and user
+// uploads stay distinguishable without any bookkeeping outside the filesystem.
 const filesRoot = () => resolve(process.env.FILES_DIR ?? "data/files");
+
+// Where a file came from: written by the agent's file tools, or uploaded by a
+// user. Maps to the on-disk location (uploads live under uploads/).
+export type FileSource = "agent" | "upload";
+export const FILE_SOURCES = ["agent", "upload"] as const;
+const UPLOADS_DIR = "uploads";
+
+const sourceDir = (conversationId: string, source: FileSource) =>
+  source === "upload"
+    ? join(filesRoot(), conversationId, UPLOADS_DIR)
+    : join(filesRoot(), conversationId);
+
+// Image uploads the chat accepts, keyed by file extension. The set matches what
+// the vision-capable providers take as image parts (PNG, JPEG, WebP, GIF).
+const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+/** Media type for a supported image file name, or null when it isn't one. */
+export function imageMediaTypeFor(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  if (dot === -1) return null;
+  return IMAGE_MEDIA_TYPES[name.slice(dot + 1).toLowerCase()] ?? null;
+}
 
 // Bounds chosen for text artifacts written by a model, not user uploads.
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -40,19 +71,31 @@ export function isValidFileName(name: string): boolean {
   );
 }
 
-export function conversationFilePath(conversationId: string, name: string): string {
+export function conversationFilePath(
+  conversationId: string,
+  name: string,
+  source: FileSource = "agent"
+): string {
   if (!isValidFileName(name)) {
     throw new Error(
       `Invalid file name ${JSON.stringify(name)}: use a plain name with extension, without slashes`
     );
   }
-  return join(filesRoot(), conversationId, name);
+  return join(sourceDir(conversationId, source), name);
 }
 
-export type ConversationFile = { name: string; size: number; updatedAt: Date };
+export type ConversationFile = {
+  name: string;
+  size: number;
+  updatedAt: Date;
+  source: FileSource;
+};
 
-export async function listConversationFiles(conversationId: string): Promise<ConversationFile[]> {
-  const dir = join(filesRoot(), conversationId);
+async function listSourceFiles(
+  conversationId: string,
+  source: FileSource
+): Promise<ConversationFile[]> {
+  const dir = sourceDir(conversationId, source);
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -60,25 +103,32 @@ export async function listConversationFiles(conversationId: string): Promise<Con
     if (isEnoent(error)) return [];
     throw error;
   }
-  const files = await Promise.all(
+  return Promise.all(
     entries
       .filter((entry) => entry.isFile())
       .map(async (entry) => {
         const stats = await stat(join(dir, entry.name));
-        return { name: entry.name, size: stats.size, updatedAt: stats.mtime };
+        return { name: entry.name, size: stats.size, updatedAt: stats.mtime, source };
       })
   );
+}
+
+export async function listConversationFiles(conversationId: string): Promise<ConversationFile[]> {
+  const files = (
+    await Promise.all(FILE_SOURCES.map((source) => listSourceFiles(conversationId, source)))
+  ).flat();
   return files.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
 }
 
 export async function statConversationFile(
   conversationId: string,
-  name: string
+  name: string,
+  source: FileSource = "agent"
 ): Promise<ConversationFile | null> {
   try {
-    const stats = await stat(conversationFilePath(conversationId, name));
+    const stats = await stat(conversationFilePath(conversationId, name, source));
     if (!stats.isFile()) return null;
-    return { name, size: stats.size, updatedAt: stats.mtime };
+    return { name, size: stats.size, updatedAt: stats.mtime, source };
   } catch (error) {
     if (isEnoent(error)) return null;
     throw error;
@@ -87,10 +137,25 @@ export async function statConversationFile(
 
 export async function readConversationFile(
   conversationId: string,
-  name: string
+  name: string,
+  source: FileSource = "agent"
 ): Promise<string | null> {
   try {
-    return await readFile(conversationFilePath(conversationId, name), "utf8");
+    return await readFile(conversationFilePath(conversationId, name, source), "utf8");
+  } catch (error) {
+    if (isEnoent(error)) return null;
+    throw error;
+  }
+}
+
+/** Raw bytes of a conversation file (image uploads); null when it doesn't exist. */
+export async function readConversationFileBytes(
+  conversationId: string,
+  name: string,
+  source: FileSource = "agent"
+): Promise<Buffer | null> {
+  try {
+    return await readFile(conversationFilePath(conversationId, name, source));
   } catch (error) {
     if (isEnoent(error)) return null;
     throw error;
@@ -104,25 +169,27 @@ export async function writeConversationFileBytes(
   conversationId: string,
   name: string,
   data: Buffer,
-  maxBytes: number = MAX_FILE_BYTES
+  maxBytes: number = MAX_FILE_BYTES,
+  source: FileSource = "agent"
 ): Promise<ConversationFile> {
-  const path = conversationFilePath(conversationId, name);
+  const path = conversationFilePath(conversationId, name, source);
   const size = data.byteLength;
   if (size > maxBytes) {
     throw new Error(`File too large (${size} bytes); the limit is ${maxBytes} bytes`);
   }
+  // The file cap spans both sources: uploads and artifacts share the budget.
   const existing = await listConversationFiles(conversationId);
   if (
     existing.length >= MAX_FILES_PER_CONVERSATION &&
-    !existing.some((file) => file.name === name)
+    !existing.some((file) => file.name === name && file.source === source)
   ) {
     throw new Error(
       `This conversation already has ${MAX_FILES_PER_CONVERSATION} files; update or reuse an existing one`
     );
   }
-  await mkdir(join(filesRoot(), conversationId), { recursive: true });
+  await mkdir(sourceDir(conversationId, source), { recursive: true });
   await writeFile(path, data);
-  return { name, size, updatedAt: new Date() };
+  return { name, size, updatedAt: new Date(), source };
 }
 
 export function writeConversationFile(
@@ -157,6 +224,21 @@ export async function editConversationFile(
 /** Deletes the conversation's folder; called when the conversation goes away. */
 export async function removeConversationFiles(conversationId: string): Promise<void> {
   await rm(join(filesRoot(), conversationId), { recursive: true, force: true });
+}
+
+/** Deletes one user upload (e.g. an image detached before sending). */
+export async function removeConversationUpload(
+  conversationId: string,
+  name: string
+): Promise<boolean> {
+  const path = conversationFilePath(conversationId, name, "upload");
+  try {
+    await rm(path);
+    return true;
+  } catch (error) {
+    if (isEnoent(error)) return false;
+    throw error;
+  }
 }
 
 const fileNameSchema = z
@@ -220,7 +302,11 @@ export function buildFileTools(conversationId: string) {
       }),
       execute: ({ name }) =>
         asToolResult(async () => {
-          const content = await readConversationFile(conversationId, name);
+          // Agent-written artifacts first, then user uploads (attached files
+          // land in the uploads folder but are read by the same tool).
+          const content =
+            (await readConversationFile(conversationId, name)) ??
+            (await readConversationFile(conversationId, name, "upload"));
           if (content === null) return { error: `File "${name}" does not exist` };
           return {
             name,
@@ -273,5 +359,6 @@ export const filesPrompt = [
   "- Save deliverables the user will want to keep or download (documents, code, plans, lists) as files instead of only pasting them into chat, and mention the file name — the user can download files from the Files view.",
   "- After writing or updating a file worth looking at, call presentFile to open it in the viewer next to the chat (markdown is rendered, HTML is displayed as a page). Don't paste the file's content into the chat as well.",
   "- Files the user attaches to a message are listed in an `<attached-files>` block (a JSON array of {name, label}); they are saved in this workspace already — read their content with readFile by name when it is relevant to the request.",
+  "- Images the user attaches are part of the message itself — you can see them directly; don't try to readFile them.",
   "- Files persist across turns of this conversation but are not visible from other conversations.",
 ].join("\n");

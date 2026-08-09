@@ -142,7 +142,11 @@ function transcriptFromUI(messages: UIMessage[]): string {
       const tools = m.parts
         .filter((p) => typeof p.type === "string" && p.type.startsWith("tool-"))
         .map((p) => `[used ${(p.type as string).slice(5)}]`);
-      const body = [text, ...tools].filter(Boolean).join(" ");
+      // Image attachments can't ride into a text summary; keep a trace of them.
+      const files = m.parts
+        .filter((p) => p.type === "file")
+        .map((p) => `[attached image: ${p.filename ?? "image"}]`);
+      const body = [text, ...files, ...tools].filter(Boolean).join(" ");
       if (!body) return "";
       return `${m.role === "user" ? "User" : "Assistant"}: ${body}`;
     })

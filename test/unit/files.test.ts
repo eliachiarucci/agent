@@ -8,12 +8,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   buildFileTools,
   editConversationFile,
+  imageMediaTypeFor,
   isValidFileName,
   listConversationFiles,
   readConversationFile,
+  readConversationFileBytes,
   removeConversationFiles,
+  removeConversationUpload,
   statConversationFile,
   writeConversationFile,
+  writeConversationFileBytes,
 } from "../../lib/agent/files";
 
 let root: string;
@@ -140,5 +144,72 @@ describe("conversation file storage", () => {
     expect(await listConversationFiles(id)).toEqual([]);
 
     await expect(removeConversationFiles(conversationId())).resolves.toBeUndefined();
+  });
+});
+
+describe("upload source", () => {
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]);
+
+  it("keeps uploads and agent files in separate namespaces of one conversation", async () => {
+    const id = conversationId();
+    await writeConversationFile(id, "notes.md", "agent");
+    await writeConversationFileBytes(id, "photo.png", bytes, 1024, "upload");
+
+    const files = await listConversationFiles(id);
+    expect(files.map((f) => `${f.source}/${f.name}`).sort()).toEqual([
+      "agent/notes.md",
+      "upload/photo.png",
+    ]);
+
+    // Same name, different sources: two distinct files.
+    await writeConversationFileBytes(id, "notes.md", Buffer.from("upload"), 1024, "upload");
+    expect(await readConversationFile(id, "notes.md")).toBe("agent");
+    expect(await readConversationFile(id, "notes.md", "upload")).toBe("upload");
+  });
+
+  it("round-trips binary bytes and stats by source", async () => {
+    const id = conversationId();
+    await writeConversationFileBytes(id, "photo.png", bytes, 1024, "upload");
+
+    expect(await readConversationFileBytes(id, "photo.png", "upload")).toEqual(bytes);
+    expect(await readConversationFileBytes(id, "photo.png")).toBeNull();
+    expect(await statConversationFile(id, "photo.png", "upload")).toMatchObject({
+      name: "photo.png",
+      size: bytes.byteLength,
+      source: "upload",
+    });
+    expect(await statConversationFile(id, "photo.png")).toBeNull();
+  });
+
+  it("deletes a single upload, false when it never existed", async () => {
+    const id = conversationId();
+    await writeConversationFileBytes(id, "photo.png", bytes, 1024, "upload");
+
+    expect(await removeConversationUpload(id, "photo.png")).toBe(true);
+    expect(await listConversationFiles(id)).toEqual([]);
+    expect(await removeConversationUpload(id, "photo.png")).toBe(false);
+  });
+
+  it("readFile tool falls back to the uploads folder for attached files", async () => {
+    const id = conversationId();
+    await writeConversationFileBytes(id, "pasted.txt", Buffer.from("pasted"), 1024, "upload");
+    const { readFile } = buildFileTools(id);
+    const callOptions = { toolCallId: "test", messages: [] };
+
+    expect(await readFile.execute!({ name: "pasted.txt" }, callOptions)).toMatchObject({
+      content: "pasted",
+    });
+  });
+});
+
+describe("imageMediaTypeFor", () => {
+  it("maps supported image extensions and rejects the rest", () => {
+    expect(imageMediaTypeFor("photo.png")).toBe("image/png");
+    expect(imageMediaTypeFor("photo.JPG")).toBe("image/jpeg");
+    expect(imageMediaTypeFor("photo.jpeg")).toBe("image/jpeg");
+    expect(imageMediaTypeFor("photo.webp")).toBe("image/webp");
+    expect(imageMediaTypeFor("anim.gif")).toBe("image/gif");
+    expect(imageMediaTypeFor("doc.pdf")).toBeNull();
+    expect(imageMediaTypeFor("no-extension")).toBeNull();
   });
 });

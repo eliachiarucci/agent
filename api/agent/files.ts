@@ -5,6 +5,7 @@ import {
     MAX_UPLOAD_BYTES,
     isValidFileName,
     listConversationFiles,
+    removeConversationUpload,
     writeConversationFileBytes,
 } from "../../lib/agent/files";
 import {
@@ -17,7 +18,7 @@ import { isAgentMember } from "../../lib/db/agents";
 export const config = {}
 
 export const OPTIONS: express.RequestHandler = async (req, res) => {
-    res.set('Allow', 'GET, POST, OPTIONS');
+    res.set('Allow', 'GET, POST, DELETE, OPTIONS');
     res.sendStatus(204);
 }
 
@@ -87,14 +88,42 @@ function readRequestBody(req: express.Request, maxBytes: number): Promise<Buffer
     });
 }
 
-// Upload a file into a conversation's workspace. Powers long pasted-content
-// attachments today and document/image uploads next. The name and conversation
-// ride in the query string; the body is the raw file bytes (any non-JSON
-// content type). Access mirrors reading the conversation: for an existing one
-// the user must be able to see it; a not-yet-created conversation (the client
-// generated its id and the first message creates the row tied to this user) may
-// be seeded by any authenticated user. Orphaned folders — uploaded but never
-// sent — are bounded by the per-conversation file cap.
+// Shared by POST and DELETE: uploads mirror reading the conversation — for an
+// existing one the user must be able to see it; a not-yet-created conversation
+// (the client generated its id and the first message creates the row tied to
+// this user) may be touched by any authenticated user.
+async function checkUploadAccess(
+    req: express.Request,
+    res: express.Response,
+    conversationId: string,
+    name: string
+): Promise<boolean> {
+    if (!isValidFileName(name)) {
+        res.status(400).json({ error: "Invalid file name" });
+        return false;
+    }
+
+    const user = await getSessionUser(req);
+    if (!user) {
+        res.status(401).json({ error: "Not authenticated" });
+        return false;
+    }
+
+    const conversation = await findMessage(conversationId);
+    if (conversation) {
+        const isMember = await isAgentMember(conversation.agentId, user.id);
+        if (!canAccessConversation(conversation, user.id, isMember)) {
+            res.status(403).json({ error: "Not allowed to access this conversation" });
+            return false;
+        }
+    }
+    return true;
+}
+
+// Upload a file into a conversation's uploads folder (pasted-content
+// attachments and chat images). The name and conversation ride in the query
+// string; the body is the raw file bytes (any non-JSON content type). Orphaned
+// uploads — uploaded but never sent — are bounded by the per-conversation cap.
 export const POST: express.RequestHandler = async (req, res) => {
     const parsed = uploadSchema.safeParse(req.query);
     if (!parsed.success) {
@@ -102,26 +131,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         return;
     }
     const { conversation_id, name } = parsed.data;
-
-    if (!isValidFileName(name)) {
-        res.status(400).json({ error: "Invalid file name" });
-        return;
-    }
-
-    const user = await getSessionUser(req);
-    if (!user) {
-        res.status(401).json({ error: "Not authenticated" });
-        return;
-    }
-
-    const conversation = await findMessage(conversation_id);
-    if (conversation) {
-        const isMember = await isAgentMember(conversation.agentId, user.id);
-        if (!canAccessConversation(conversation, user.id, isMember)) {
-            res.status(403).json({ error: "Not allowed to access this conversation" });
-            return;
-        }
-    }
+    if (!(await checkUploadAccess(req, res, conversation_id, name))) return;
 
     let data: Buffer;
     try {
@@ -136,14 +146,41 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     try {
-        const file = await writeConversationFileBytes(conversation_id, name, data, MAX_UPLOAD_BYTES);
+        const file = await writeConversationFileBytes(
+            conversation_id,
+            name,
+            data,
+            MAX_UPLOAD_BYTES,
+            "upload"
+        );
         res.status(201).json({
             conversationId: conversation_id,
             name: file.name,
             size: file.size,
             updatedAt: file.updatedAt,
+            source: file.source,
         });
     } catch (error) {
         res.status(400).json({ error: error instanceof Error ? error.message : "Upload failed" });
     }
+}
+
+// Remove one upload (e.g. an image detached in the composer before sending).
+// Only uploads are deletable this way: agent-written artifacts are managed by
+// the agent's own tools and disappear with the conversation.
+export const DELETE: express.RequestHandler = async (req, res) => {
+    const parsed = uploadSchema.safeParse(req.query);
+    if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues });
+        return;
+    }
+    const { conversation_id, name } = parsed.data;
+    if (!(await checkUploadAccess(req, res, conversation_id, name))) return;
+
+    const removed = await removeConversationUpload(conversation_id, name);
+    if (!removed) {
+        res.status(404).json({ error: "File not found" });
+        return;
+    }
+    res.sendStatus(204);
 }

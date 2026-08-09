@@ -226,11 +226,11 @@ describe("provider settings", () => {
       provider: "lmstudio",
       settings: { url: mock.url, model: "test-model-a" },
     });
-    // The mock has no /api/v0 endpoint, so the window is unknown — but the
-    // route resolves the stored model and answers.
+    // The mock has no /api/v0 endpoint, so the window and the vision
+    // capability are unknown — but the route resolves the stored model and answers.
     const ctx = await client.get("/agent/context?provider=lmstudio");
     expect(ctx.status).toBe(200);
-    expect(ctx.body).toEqual({ model: "test-model-a", contextLength: null });
+    expect(ctx.body).toEqual({ model: "test-model-a", contextLength: null, supportsImages: null });
   });
 
   it("scopes settings per user and supports deletion", async () => {

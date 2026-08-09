@@ -1,7 +1,7 @@
 import express from 'express';
 import { z } from "zod";
 import { resolveConversationViewer } from "../../../lib/agent/actor";
-import { conversationFilePath, isValidFileName } from "../../../lib/agent/files";
+import { FILE_SOURCES, conversationFilePath, isValidFileName } from "../../../lib/agent/files";
 
 export const config = {}
 
@@ -13,6 +13,9 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
 const querySchema = z.object({
     conversation_id: z.uuid(),
     name: z.string().min(1),
+    // Which folder the file lives in: agent-written artifacts (default) or
+    // user uploads (chat images, pasted attachments).
+    source: z.enum(FILE_SOURCES).default("agent"),
 });
 
 export const GET: express.RequestHandler = async (req, res) => {
@@ -21,7 +24,7 @@ export const GET: express.RequestHandler = async (req, res) => {
         res.status(400).json({ error: parsed.error.issues });
         return;
     }
-    const { conversation_id, name } = parsed.data;
+    const { conversation_id, name, source } = parsed.data;
 
     if (!isValidFileName(name)) {
         res.status(400).json({ error: "Invalid file name" });
@@ -36,7 +39,7 @@ export const GET: express.RequestHandler = async (req, res) => {
 
     // res.download sets Content-Disposition: attachment, so the browser saves
     // the file instead of rendering it (no HTML/script execution on our origin).
-    res.download(conversationFilePath(conversation_id, name), name, (error) => {
+    res.download(conversationFilePath(conversation_id, name, source), name, (error) => {
         if (error && !res.headersSent) {
             res.status(404).json({ error: "File not found" });
         }

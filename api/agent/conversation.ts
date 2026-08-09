@@ -44,9 +44,12 @@ import {
     ATTACHED_FILES_MARKER,
     buildFileTools,
     filesPrompt,
+    imageMediaTypeFor,
     isValidFileName,
     removeConversationFiles,
+    statConversationFile,
 } from "../../lib/agent/files";
+import { buildImageFileParts, inlineImageFileParts } from "../../lib/agent/image-parts";
 import { buildNoteTools, notesPrompt } from "../../lib/agent/notes";
 import {
     buildConversationSearchTools,
@@ -137,6 +140,17 @@ const attachmentSchema = z.object({
     label: z.string().min(1).max(200),
 });
 
+// Images the user attached to this turn, already uploaded to the conversation's
+// uploads folder (POST /agent/files). Unlike text attachments they don't ride
+// as an <attached-files> marker: they become real file parts on the user
+// message, so vision models see the pixels.
+const imageSchema = z.object({
+    name: z
+        .string()
+        .refine(isValidFileName, "Invalid file name")
+        .refine((name) => imageMediaTypeFor(name) !== null, "Unsupported image type"),
+});
+
 // The user's decision on one pending approval prompt ("ask"-level tool call).
 // `always` additionally stores a standing (tool, target) approval override.
 const approvalResponseSchema = z.object({
@@ -160,6 +174,7 @@ const bodySchema = z
         // memory tools, background extraction). Only honored at creation.
         memory: z.boolean().optional(),
         attachments: z.array(attachmentSchema).max(20).optional(),
+        images: z.array(imageSchema).max(20).optional(),
         tool_approvals: z.array(approvalResponseSchema).min(1).max(20).optional(),
         // The model selected in the UI. Resolved against the *sender's* provider
         // settings; omitted → the env-configured default model.
@@ -172,9 +187,13 @@ const bodySchema = z
     .refine(
         (d) =>
             d.tool_approvals
-                ? d.message.trim().length === 0 && (d.attachments?.length ?? 0) === 0
-                : d.message.trim().length > 0 || (d.attachments?.length ?? 0) > 0,
-        { message: "message/attachments or tool_approvals required (not both)" }
+                ? d.message.trim().length === 0 &&
+                  (d.attachments?.length ?? 0) === 0 &&
+                  (d.images?.length ?? 0) === 0
+                : d.message.trim().length > 0 ||
+                  (d.attachments?.length ?? 0) > 0 ||
+                  (d.images?.length ?? 0) > 0,
+        { message: "message/attachments/images or tool_approvals required (not both)" }
     );
 
 export const POST: express.RequestHandler = async (req, res) => {
@@ -191,6 +210,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         shared,
         memory,
         attachments,
+        images,
         tool_approvals,
         provider,
         model,
@@ -289,6 +309,26 @@ export const POST: express.RequestHandler = async (req, res) => {
             });
             pipeUIMessageStreamToResponse({ response: res, stream, consumeSseStream: consumeStream });
             return;
+        }
+    }
+
+    // Attached images must already sit in the conversation's uploads folder
+    // (the composer uploads them on selection); checked before model resolution
+    // so a stale reference is a clear 400 rather than a mid-stream failure.
+    if (images && images.length > 0) {
+        if (conversation_id === undefined) {
+            res.status(400).json({ error: "images require a conversation_id" });
+            return;
+        }
+        const imageConversationId = existing?.id ?? conversation_id;
+        for (const image of images) {
+            const file = await statConversationFile(imageConversationId, image.name, "upload");
+            if (!file) {
+                res.status(400).json({
+                    error: `Image "${image.name}" was not uploaded to this conversation`,
+                });
+                return;
+            }
         }
     }
 
@@ -403,6 +443,16 @@ export const POST: express.RequestHandler = async (req, res) => {
                 ? ATTACHED_FILES_MARKER + JSON.stringify(attachments)
                 : "";
 
+        // Image parts reference the upload by download URL (what the UI renders);
+        // the copy sent to the model swaps them for data: URLs (inlineImageFileParts).
+        const imageParts =
+            images && images.length > 0 && conversation_id !== undefined
+                ? buildImageFileParts(
+                      existing?.id ?? conversation_id,
+                      images.map((i) => i.name)
+                  )
+                : [];
+
         history.push({
             id: crypto.randomUUID(),
             role: "user",
@@ -410,6 +460,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             parts: [
                 ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
                 ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
+                ...imageParts,
                 ...(attachmentsBlock ? [{ type: "text" as const, text: attachmentsBlock }] : []),
             ],
         });
@@ -498,7 +549,12 @@ export const POST: express.RequestHandler = async (req, res) => {
     // persisted for scrollback). Speaker labels only matter (and only stay
     // stable) when several people can write; private chats keep the prompt
     // unchanged.
-    const modelView = applyCompaction(history, existing?.compaction ?? null);
+    // Image parts are stored with app-internal download URLs; the model gets
+    // data: URLs read from disk instead (providers can't fetch our routes).
+    const modelView = await inlineImageFileParts(
+        applyCompaction(history, existing?.compaction ?? null),
+        conversationId
+    );
     const modelHistory = conversationShared ? withSpeakerLabels(modelView) : modelView;
     const modelMessages = await convertToModelMessages(modelHistory, {
         tools,
