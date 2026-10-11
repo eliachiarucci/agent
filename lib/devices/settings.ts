@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_TYPES } from "../global/schema";
 import type { DeviceConfig } from "./protocol";
 
 // Per-device settings, stored as JSONB on `devices.settings`. Rows are always
@@ -29,10 +30,30 @@ const retentionSchema = z.object({
   observationDays: z.number().int().min(1).max(3650),
 });
 
+const perceptionSchema = z.object({
+  // Off: frames are stored but never captioned.
+  enabled: z.boolean(),
+  // The captioning model, resolved against the owner's provider settings. NULL
+  // provider → the owner's default model; NULL model → the provider's default.
+  provider: z.enum(PROVIDER_TYPES).nullable(),
+  model: z.string().min(1).max(200).nullable(),
+  // OpenRouter only: the endpoints allowed to serve the call, e.g.
+  // ["google-vertex/europe"] (plan D20).
+  route: z
+    .object({
+      only: z.array(z.string().min(1).max(100)).min(1).max(8),
+      allowFallbacks: z.boolean(),
+    })
+    .nullable(),
+  // Captions per rolling hour. Over it, frames are stored but not captioned.
+  framesPerHour: z.number().int().min(0).max(3600),
+});
+
 export const deviceSettingsSchema = z.object({
   paused: z.boolean(),
   cadence: cadenceSchema,
   retention: retentionSchema,
+  perception: perceptionSchema,
 });
 export type DeviceSettings = z.infer<typeof deviceSettingsSchema>;
 
@@ -47,6 +68,8 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
     fov: 125,
   },
   retention: { frameDays: 7, observationDays: 90 },
+  // 300 an hour is ≈ $0.27 an hour at most with Claude Haiku 5.5 at 2576×1449 (P0 bench).
+  perception: { enabled: true, provider: null, model: null, route: null, framesPerHour: 300 },
 };
 
 // What PATCH /agent/devices accepts: any subset, section by section.
@@ -54,6 +77,7 @@ export const deviceSettingsPatchSchema = z.strictObject({
   paused: z.boolean().optional(),
   cadence: cadenceSchema.partial().strict().optional(),
   retention: retentionSchema.partial().strict().optional(),
+  perception: perceptionSchema.partial().strict().optional(),
 });
 export type DeviceSettingsPatch = z.infer<typeof deviceSettingsPatchSchema>;
 
@@ -62,6 +86,7 @@ export function mergeDeviceSettings(base: DeviceSettings, patch: DeviceSettingsP
     paused: patch.paused ?? base.paused,
     cadence: { ...base.cadence, ...patch.cadence },
     retention: { ...base.retention, ...patch.retention },
+    perception: { ...base.perception, ...patch.perception },
   };
 }
 
@@ -72,6 +97,7 @@ export function readDeviceSettings(stored: unknown): DeviceSettings {
     paused: value.paused ?? DEFAULT_DEVICE_SETTINGS.paused,
     cadence: { ...DEFAULT_DEVICE_SETTINGS.cadence, ...value.cadence },
     retention: { ...DEFAULT_DEVICE_SETTINGS.retention, ...value.retention },
+    perception: { ...DEFAULT_DEVICE_SETTINGS.perception, ...value.perception },
   };
   const parsed = deviceSettingsSchema.safeParse(merged);
   return parsed.success ? parsed.data : DEFAULT_DEVICE_SETTINGS;

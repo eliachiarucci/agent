@@ -1,17 +1,21 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { db } from "../global/db";
 import {
   agentMembers,
   deviceEvents,
   deviceObservations,
   devices,
+  type CaptionStatus,
   type DeviceEventKind,
 } from "../global/schema";
 
 export type Device = typeof devices.$inferSelect;
 export type NewDevice = typeof devices.$inferInsert;
-export type DeviceObservation = typeof deviceObservations.$inferSelect;
 export type NewDeviceObservation = typeof deviceObservations.$inferInsert;
+
+// Observations are read without their embedding (1.5 KB each, only search needs it).
+const { embedding: _embedding, ...observationColumns } = getTableColumns(deviceObservations);
+export type DeviceObservation = Omit<typeof deviceObservations.$inferSelect, "embedding">;
 
 export async function createDevice(data: NewDevice): Promise<Device> {
   const [row] = await db.insert(devices).values(data).returning();
@@ -74,40 +78,109 @@ export async function deleteDevice(id: string): Promise<Device | undefined> {
 }
 
 export async function insertObservation(data: NewDeviceObservation): Promise<DeviceObservation> {
-  const [row] = await db.insert(deviceObservations).values(data).returning();
+  const [row] = await db.insert(deviceObservations).values(data).returning(observationColumns);
   return row;
 }
 
 export async function getObservation(id: string): Promise<DeviceObservation | undefined> {
-  return db.query.deviceObservations.findFirst({ where: eq(deviceObservations.id, id) });
+  const [row] = await db
+    .select(observationColumns)
+    .from(deviceObservations)
+    .where(eq(deviceObservations.id, id));
+  return row;
 }
 
-/** Newest first. `before` pages backwards by capture time. */
-export async function listObservations(query: {
+export type ObservationQuery = {
   deviceId: string;
   from?: Date;
   to?: Date;
   before?: Date;
+  minSalience?: number;
   limit: number;
-}): Promise<DeviceObservation[]> {
+};
+
+const observationFilter = (query: ObservationQuery) =>
+  and(
+    eq(deviceObservations.deviceId, query.deviceId),
+    query.from && gte(deviceObservations.capturedAt, query.from),
+    query.to && lte(deviceObservations.capturedAt, query.to),
+    query.before && lt(deviceObservations.capturedAt, query.before),
+    query.minSalience !== undefined ? gte(deviceObservations.salience, query.minSalience) : undefined
+  );
+
+/** Newest first. `before` pages backwards by capture time. */
+export async function listObservations(query: ObservationQuery): Promise<DeviceObservation[]> {
   return db
-    .select()
+    .select(observationColumns)
     .from(deviceObservations)
-    .where(
-      and(
-        eq(deviceObservations.deviceId, query.deviceId),
-        query.from && gte(deviceObservations.capturedAt, query.from),
-        query.to && lte(deviceObservations.capturedAt, query.to),
-        query.before && lt(deviceObservations.capturedAt, query.before)
-      )
-    )
+    .where(observationFilter(query))
     .orderBy(desc(deviceObservations.capturedAt), desc(deviceObservations.id))
     .limit(query.limit);
+}
+
+/** Captioned observations closest in meaning to the query vector, best first. */
+export async function searchObservations(
+  query: ObservationQuery & { vector: number[] }
+): Promise<Array<DeviceObservation & { relevance: number }>> {
+  const distance = sql<number>`${deviceObservations.embedding} <=> ${JSON.stringify(query.vector)}::halfvec`;
+  const rows = await db
+    .select({ ...observationColumns, distance })
+    .from(deviceObservations)
+    .where(and(observationFilter(query), isNotNull(deviceObservations.embedding)))
+    .orderBy(distance)
+    .limit(query.limit);
+  return rows.map(({ distance, ...row }) => ({ ...row, relevance: 1 - Number(distance) }));
 }
 
 export async function latestObservation(deviceId: string): Promise<DeviceObservation | undefined> {
   const [row] = await listObservations({ deviceId, limit: 1 });
   return row;
+}
+
+export async function latestCaptioned(deviceId: string): Promise<DeviceObservation | undefined> {
+  const [row] = await db
+    .select(observationColumns)
+    .from(deviceObservations)
+    .where(and(eq(deviceObservations.deviceId, deviceId), eq(deviceObservations.captionStatus, "captioned")))
+    .orderBy(desc(deviceObservations.captionedAt))
+    .limit(1);
+  return row;
+}
+
+export async function updateCaption(
+  id: string,
+  changes: Pick<NewDeviceObservation, "captionStatus"> &
+    Partial<Pick<NewDeviceObservation, "caption" | "captionMeta" | "captionedAt" | "salience" | "embedding">>
+): Promise<DeviceObservation | undefined> {
+  const [row] = await db
+    .update(deviceObservations)
+    .set(changes)
+    .where(eq(deviceObservations.id, id))
+    .returning(observationColumns);
+  return row;
+}
+
+/** Sets a final status on a frame that is still waiting (status NULL). */
+export async function settleWaitingCaption(id: string, status: CaptionStatus): Promise<void> {
+  await db
+    .update(deviceObservations)
+    .set({ captionStatus: status })
+    .where(and(eq(deviceObservations.id, id), isNull(deviceObservations.captionStatus)));
+}
+
+/** Model calls (captioned or failed) since `since`: what the hourly budget counts. */
+export async function countCaptionCalls(deviceId: string, since: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(deviceObservations)
+    .where(
+      and(
+        eq(deviceObservations.deviceId, deviceId),
+        gte(deviceObservations.captionedAt, since),
+        inArray(deviceObservations.captionStatus, ["captioned", "failed"])
+      )
+    );
+  return row.n;
 }
 
 /** Observations received before `cutoff` that still have a frame on disk, oldest first. */

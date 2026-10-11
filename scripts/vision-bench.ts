@@ -2,14 +2,11 @@ import "dotenv/config";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { parseArgs } from "node:util";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, NoObjectGeneratedError, Output, type LanguageModelUsage } from "ai";
-import { z } from "zod";
+import type { LanguageModelUsage } from "ai";
 
-const { chatModelFromSettings } = await import("../lib/global/ai");
-const { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl } = await import(
-  "../lib/global/providers"
-);
+const { captionFrame } = await import("../lib/devices/caption");
+type Caption = import("../lib/devices/caption").Caption;
+const { buildPerceptionModel, perceptionProviderOptions } = await import("../lib/devices/perception-model");
 const { getProviderSetting } = await import("../lib/db/provider-settings");
 const { listUsers } = await import("../lib/db/users");
 const { PROVIDER_TYPES } = await import("../lib/global/schema");
@@ -19,7 +16,8 @@ type ProviderSettingsValue = import("../lib/global/schema").ProviderSettingsValu
 // Benchmark for a device's perception step: runs camera frames through candidate vision
 // models and records, per call, whether the caption matched the schema, the latency, the
 // tokens and the cost. Frames run in name order and each call gets the model's previous
-// caption, the way a perception worker would chain them.
+// caption, the way the perception worker chains them. The prompt, schema and model setup
+// are the worker's own (lib/devices/caption.ts, lib/devices/perception-model.ts).
 //
 //   npm run vision-bench -- --user <username> \
 //     --model anthropic:claude-haiku-5-5 --model google:gemini-3.1-flash-lite \
@@ -30,37 +28,6 @@ type ProviderSettingsValue = import("../lib/global/schema").ProviderSettingsValu
 // OPENAI_API_KEY, OPENROUTER_API_KEY, DEEPINFRA_API_KEY, TENSORX_API_KEY, and LMSTUDIO_URL
 // (default http://localhost:1234) for LM Studio. Writes the full results as JSON (--out)
 // and prints a summary per model.
-
-const captionSchema = z.object({
-  summary: z.string().describe("One or two sentences about the scene"),
-  changes: z
-    .string()
-    .describe('What changed since the previous description; "none" if nothing relevant changed'),
-  entities: z.array(
-    z.object({
-      kind: z.enum(["person", "animal", "vehicle", "object"]),
-      description: z.string(),
-      isNew: z.boolean(),
-    })
-  ),
-  salience: z.number().min(0).max(1),
-  wake: z.enum(["none", "log", "agent"]),
-  reason: z.string(),
-});
-type Caption = z.infer<typeof captionSchema>;
-
-const INSTRUCTIONS = `You are the eyes of a small rover in a private garden. Each message brings one camera frame (a wide, lens-corrected view from close to the ground) and the description of the previous frame.
-
-Describe what you see and what changed:
-- summary: one or two sentences about the scene.
-- changes: what changed since the previous description; "none" if nothing relevant changed, "first frame" if there is no previous description.
-- entities: the people, animals, vehicles and notable objects in view, each with a short visual description, and isNew = true if it wasn't in the previous description.
-- salience: 0 for nothing of interest (an empty garden, a change in light), up to 1 for something that needs attention now.
-- wake: "none" if nothing relevant changed; "log" for a change worth a line in the day's log; "agent" when the rover's agent should decide whether to act (someone arrives or speaks to the rover, an animal is in the garden, something unusual or possibly unsafe).
-- reason: one short sentence on why you chose that wake level.
-
-Never say who a person is, even if you think you recognise them: describe people only by what is visible (clothes, posture, what they are doing). Names, when known, come from a separate face-recognition step.
-Describe only what is in the frame; don't guess at what is outside it.`;
 
 // $ per 1M tokens (input, output), checked on the providers' pricing pages on 2026-10-10.
 // Matched by substring of the model id; unknown models report no cost.
@@ -127,61 +94,26 @@ async function resolveModel(spec: string) {
     if (!apiKey) throw new Error(`${ENV_KEYS[type]} is not set`);
     settings = { apiKey };
   }
-  let options = providerOptions(type, modelId);
-  if (endpoint) {
-    if (type !== "openrouter") throw new Error(`@endpoint only works with openrouter: ${spec}`);
-    options = { openrouter: { ...options?.openrouter, provider: { only: [endpoint], allow_fallbacks: false } } };
-  }
-  return { spec, modelId, model: buildModel(type, settings, modelId), providerOptions: options };
+  if (endpoint && type !== "openrouter") throw new Error(`@endpoint only works with openrouter: ${spec}`);
+  return {
+    spec,
+    provider: type,
+    modelId,
+    model: buildPerceptionModel(type, settings, modelId),
+    providerOptions: providerOptions(type, modelId, endpoint),
+  };
 }
 
-// The OpenAI-compatible providers only send a JSON schema when the model is created with
-// supportsStructuredOutputs; chatModelFromSettings doesn't set it (chat needs no schema), so
-// without it the model would see "JSON mode" and no schema. Same setup as
-// chatModelFromSettings otherwise.
-const COMPATIBLE_BASE_URLS: Partial<Record<ProviderType, (s: ProviderSettingsValue) => string>> = {
-  lmstudio: (s) => `${lmstudioBaseUrl(s.url ?? "http://localhost:1234")}/v1`,
-  openrouter: () => OPENROUTER_BASE_URL,
-  deepinfra: () => DEEPINFRA_BASE_URL,
-  tensorx: () => TENSORX_BASE_URL,
-};
-
-function buildModel(type: ProviderType, settings: ProviderSettingsValue, modelId: string) {
-  const baseURL = COMPATIBLE_BASE_URLS[type]?.(settings);
-  if (!baseURL) return chatModelFromSettings(type, settings, modelId);
-  return createOpenAICompatible({
-    name: type,
-    baseURL,
-    apiKey: settings.apiKey ?? "lm-studio",
-    includeUsage: true,
-    supportsStructuredOutputs: true,
-  }).chatModel(modelId);
-}
-
-// Captions want no reasoning: it adds latency and output tokens for no gain here.
-function providerOptions(provider: ProviderType, modelId: string) {
-  if (provider === "openai" && /^gpt-[56]/.test(modelId)) {
-    // @ai-sdk/openai 3.0.68 doesn't recognise gpt-6 ids as reasoning models;
-    // forceReasoning gets it the developer role and reasoning_effort.
-    return { openai: { forceReasoning: true, reasoningEffort: "none" } };
-  }
-  if (provider === "openrouter") {
-    // OpenRouter's unified switch; openai-compatible passes unknown options into the body.
-    // Claude doesn't reason unless asked; Gemini 3 maps effort to its thinking level.
-    if (/gemini-3/.test(modelId)) return { openrouter: { reasoning: { effort: "minimal" } } };
-    if (/gpt-[56]|gemma|qwen/.test(modelId)) return { openrouter: { reasoning: { effort: "none" } } };
-    return undefined;
-  }
-  if (provider === "google") {
-    const media = args["gemini-media"];
-    return {
-      google: {
-        ...(/gemini-3/.test(modelId) && { thinkingConfig: { thinkingLevel: "minimal" } }),
-        ...(media && { mediaResolution: `MEDIA_RESOLUTION_${media.toUpperCase()}` }),
-      },
-    };
-  }
-  return undefined;
+// The worker's options, plus the bench's own Gemini media-resolution switch.
+function providerOptions(type: ProviderType, modelId: string, endpoint?: string) {
+  const options = perceptionProviderOptions(
+    type,
+    modelId,
+    endpoint ? { only: [endpoint], allowFallbacks: false } : null
+  );
+  const media = args["gemini-media"];
+  if (type !== "google" || !media) return options;
+  return { google: { ...options?.google, mediaResolution: `MEDIA_RESOLUTION_${media.toUpperCase()}` } };
 }
 
 type Call = {
@@ -213,40 +145,16 @@ async function runModel(target: Awaited<ReturnType<typeof resolveModel>>): Promi
     const started = performance.now();
     const call: Call = { model: target.spec, frame: basename(frame), ok: false, ms: 0 };
     let usage: LanguageModelUsage | undefined;
-    try {
-      const result = await generateText({
-        model: target.model,
-        system: INSTRUCTIONS,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: previous
-                  ? `Previous description:\n${JSON.stringify(previous)}`
-                  : "No previous description: this is the first frame.",
-              },
-              { type: "image", image, mediaType: "image/jpeg" },
-            ],
-          },
-        ],
-        output: Output.object({ schema: captionSchema }),
-        providerOptions: target.providerOptions,
-        maxRetries: 1,
-        abortSignal: AbortSignal.timeout(120_000),
-      });
-      usage = result.usage;
-      call.responseId = result.response.id;
-      call.caption = result.output;
+    const result = await captionFrame({ target, image, previous: previous ?? null, timeoutMs: 120_000 });
+    usage = result.usage;
+    if (result.ok) {
+      call.responseId = result.responseId;
+      call.caption = result.caption;
       call.ok = true;
-      previous = result.output;
-    } catch (error) {
-      if (NoObjectGeneratedError.isInstance(error)) {
-        usage = error.usage;
-        call.rawText = error.text;
-      }
-      call.error = error instanceof Error ? error.message : String(error);
+      previous = result.caption;
+    } else {
+      call.error = result.error;
+      call.rawText = result.rawText;
     }
     call.ms = Math.round(performance.now() - started);
     call.inputTokens = usage?.inputTokens;

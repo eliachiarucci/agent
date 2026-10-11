@@ -1,8 +1,8 @@
 # Devices
 
 Camera + speaker devices (the rover first; a Pi with a webcam or `scripts/device-sim.ts` work the same way) stream
-frames to the backend over one outbound WebSocket each. This is the foundation of the vision agent: captions,
-agent runs and speech build on it. The full plan lives in the rover repo (`rover2/docs/vision-agent-plan.md`).
+frames to the backend over one outbound WebSocket each, and a vision model captions them. This is the foundation of
+the vision agent: agent runs and speech build on it. The full plan lives in the rover repo (`rover2/docs/vision-agent-plan.md`).
 
 ## Model
 
@@ -10,7 +10,9 @@ agent runs and speech build on it. The full plan lives in the rover repo (`rover
   token's SHA-256, settings (JSONB), the last `hello` and `telemetry`, `last_seen_at`.
 - **`device_observations`**: one row per frame: `seq`, `trigger` (`change` / `heartbeat` / `request`),
   `request_id`, `captured_at` (device clock), `received_at` (server clock), size, and `frame`, the file name on
-  disk (`NULL` once retention removed the image).
+  disk (`NULL` once retention removed the image). Then the caption: `caption_status`, `caption` (JSON),
+  `caption_meta` (provider, model, ms, tokens, error), `captioned_at`, `salience`, and `embedding` (`halfvec(768)`
+  of the summary).
 - **`device_events`**: connected / disconnected / error.
 - **Frames on disk:** `FILES_DIR/devices/<device id>/frames/<uuid>.jpg`, in the volume deployments already mount.
 - **Access:** the owner manages the device (settings, token, delete). Members of the device's agent can see it,
@@ -33,6 +35,10 @@ as a `config` message.
 | `cadence.fov` | 125 | Diagonal field of view of the corrected view, 60–127° |
 | `retention.frameDays` | 7 | Frame images |
 | `retention.observationDays` | 90 | Observation rows and device events; frames never outlive their row |
+| `perception.enabled` | `true` | Off: frames are stored, never captioned |
+| `perception.provider`, `perception.model` | `null` | The captioning model, from the owner's providers. `null` provider → the owner's default model; `null` model → the provider's default |
+| `perception.route` | `null` | OpenRouter only: `{ only: ["google-vertex/europe"], allowFallbacks: false }` pins the endpoints that may serve the call |
+| `perception.framesPerHour` | 300 | Model calls per rolling hour (captioned + failed) |
 
 ## Link
 
@@ -67,9 +73,25 @@ reconnect after these, and should reconnect with backoff after anything else.
 |---|---|---|---|
 | GET / POST / PATCH / DELETE | `/agent/devices` | session (owner for changes) | List, register (`{ name, agent_id? }` → `{ device, token }`), rename / move / settings, delete |
 | POST | `/agent/devices/token` | owner | Rotate the token (`{ id }` → `{ token }`) |
-| GET | `/agent/devices/status?id=` | viewer | Online, last seen, hello, telemetry, newest observation |
-| GET | `/agent/devices/observations?device_id=&from=&to=&before=&limit=` | viewer | Timeline, newest first, up to 200 per page |
+| GET | `/agent/devices/status?id=` | viewer | Online, last seen, hello, telemetry, newest observation and caption, `perception` (model, budget, calls in the last hour) |
+| GET | `/agent/devices/observations?device_id=&from=&to=&before=&min_salience=&q=&limit=` | viewer | Timeline, newest first, up to 200 per page. With `q`: semantic search, best match first, each with `relevance` |
 | GET | `/agent/devices/frame?id=` | viewer | One observation's JPEG |
+| GET | `/agent/devices/live?id=` | viewer | Server-sent events: `status` (first), `observation` (a frame arrived), `caption` (its caption settled), `deleted` |
+
+## Captions
+
+`lib/devices/perception.ts`, one worker per device, one model call at a time.
+
+- **Newest frame wins:** while a call runs, only the newest frame waits; one that is overtaken is `superseded`.
+- **The call** (`lib/devices/caption.ts`): `generateText` with `Output.object` and the caption schema (`summary`,
+  `changes`, `entities`, `salience`, `wake`, `reason`), the frame and the previous caption. Reasoning is off. The
+  OpenAI-compatible providers are built with `supportsStructuredOutputs` so the schema is sent
+  (`lib/devices/perception-model.ts`). The prompt tells the model to describe people, never identify them.
+- **Statuses:** `NULL` while waiting, then `captioned`, `failed` (error in `caption_meta`), `superseded`,
+  `over_budget`, `no_model` (no model resolves) or `disabled`. Only `captioned` and `failed` count towards the budget.
+- **Search:** captioned summaries are embedded with EmbeddingGemma (document side) and searched by cosine distance,
+  per device, without an ANN index. Half precision keeps 90 days at ~2,000 frames a day to ≈ 280 MB.
+- `npm run vision-bench` runs the same call across models (the P0 bench).
 
 ## Retention
 

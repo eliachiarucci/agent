@@ -17,6 +17,8 @@ import {
   type ServerTextMessage,
 } from "./protocol";
 import { InvalidFrameError, MAX_FRAME_BYTES, inspectJpeg, removeFrame, writeFrame } from "./frames";
+import { publicObservation, publishLive } from "./live";
+import { perceptionWorker } from "./perception";
 import { TokenBucket } from "./rate-limit";
 import { deviceConfig, readDeviceSettings, type DeviceSettings } from "./settings";
 import { bearerToken, hashDeviceToken } from "./tokens";
@@ -78,7 +80,10 @@ export function disconnectDevice(deviceId: string, code: number, reason: string)
 
 function close(connection: Connection, code: number, reason: string): void {
   connection.closedWith = code;
-  if (connections.get(connection.deviceId) === connection) connections.delete(connection.deviceId);
+  if (connections.get(connection.deviceId) === connection) {
+    connections.delete(connection.deviceId);
+    publishLive(connection.deviceId, { type: "status", online: false });
+  }
   connection.ws.close(code, reason);
 }
 
@@ -166,6 +171,7 @@ function onConnection(
     frames: new TokenBucket(FRAME_BURST, FRAMES_PER_SECOND),
   };
   connections.set(deviceId, connection);
+  publishLive(deviceId, { type: "status", online: true });
   log(insertDeviceEvent(deviceId, "connected", { remote: req.socket.remoteAddress }));
   log(touchDevice(deviceId));
   send(ws, { type: "config", ...deviceConfig(settings) });
@@ -194,7 +200,10 @@ function onConnection(
   });
 
   ws.on("close", (code: number) => {
-    if (connections.get(deviceId) === connection) connections.delete(deviceId);
+    if (connections.get(deviceId) === connection) {
+      connections.delete(deviceId);
+      publishLive(deviceId, { type: "status", online: false });
+    }
     // A deleted device has no row left to log against.
     if (connection.closedWith !== CLOSE_DELETED) log(insertDeviceEvent(deviceId, "disconnected", { code }));
   });
@@ -239,8 +248,9 @@ async function onBinary(connection: Connection, data: Buffer): Promise<void> {
       : receivedAt;
 
   const name = await writeFrame(connection.deviceId, payload);
+  let observation;
   try {
-    await insertObservation({
+    observation = await insertObservation({
       deviceId: connection.deviceId,
       seq: frame.seq,
       trigger: frame.trigger,
@@ -256,6 +266,8 @@ async function onBinary(connection: Connection, data: Buffer): Promise<void> {
     await removeFrame(connection.deviceId, name);
     throw error;
   }
+  publishLive(connection.deviceId, { type: "observation", observation: publicObservation(observation) });
+  perceptionWorker.enqueue(connection.deviceId, observation.id);
   await touchDevice(connection.deviceId);
 }
 

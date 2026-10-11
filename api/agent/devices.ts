@@ -5,6 +5,8 @@ import { createDevice, deleteDevice, listDevicesForUser, updateDevice } from "..
 import { deviceRole, publicDevice, resolveDeviceAccess } from "../../lib/devices/access";
 import { removeDeviceFiles } from "../../lib/devices/frames";
 import { CLOSE_DELETED, disconnectDevice, pushDeviceSettings } from "../../lib/devices/gateway";
+import { publishLive } from "../../lib/devices/live";
+import { perceptionWorker } from "../../lib/devices/perception";
 import {
     DEFAULT_DEVICE_SETTINGS,
     deviceSettingsPatchSchema,
@@ -123,5 +125,7 @@ export const DELETE: express.RequestHandler = async (req, res) => {
     disconnectDevice(parsed.data.id, CLOSE_DELETED, "Device deleted");
     await deleteDevice(parsed.data.id);
     await removeDeviceFiles(parsed.data.id);
+    perceptionWorker.forget(parsed.data.id);
+    publishLive(parsed.data.id, { type: "deleted" });
     res.status(204).end();
 }

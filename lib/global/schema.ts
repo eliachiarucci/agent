@@ -1,6 +1,7 @@
 import {
   boolean,
   customType,
+  halfvec,
   index,
   integer,
   jsonb,
@@ -17,6 +18,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { ModelMessage, UIMessage } from "ai";
 import type { DeviceHello, DeviceTelemetry, FrameTrigger } from "../devices/protocol";
 import type { DeviceSettings } from "../devices/settings";
+import type { Caption } from "../devices/caption";
 
 // Postgres full-text-search vector. Drizzle has no native tsvector type, so we
 // declare a minimal one; it is only ever populated as a generated column, never
@@ -638,6 +640,29 @@ export const devices = pgTable(
   ]
 );
 
+// What happened to a frame's caption (lib/devices/perception.ts). NULL = waiting
+// for the worker. "superseded": a newer frame arrived before the worker got to
+// it (only the newest waiting frame is captioned). Only "captioned" and
+// "failed" were model calls, and they alone count towards the hourly budget.
+export const CAPTION_STATUSES = [
+  "captioned",
+  "failed",
+  "superseded",
+  "over_budget",
+  "no_model",
+  "disabled",
+] as const;
+export type CaptionStatus = (typeof CAPTION_STATUSES)[number];
+
+export type CaptionMeta = {
+  provider: string;
+  model: string;
+  ms: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  error?: string;
+};
+
 // One row per frame the device sent. The JPEG lives on disk
 // (FILES_DIR/devices/<device id>/frames/<frame>); `frame` turns NULL when the
 // retention job deletes the image, and the row itself goes later
@@ -660,10 +685,22 @@ export const deviceObservations = pgTable(
     width: integer("width").notNull(),
     height: integer("height").notNull(),
     bytes: integer("bytes").notNull(),
+    // The caption (plan 4.4), filled in by the perception worker.
+    captionStatus: text("caption_status").$type<CaptionStatus>(),
+    caption: jsonb("caption").$type<Caption>(),
+    captionMeta: jsonb("caption_meta").$type<CaptionMeta>(),
+    // When the model call finished (captioned or failed): the budget window.
+    captionedAt: timestamp("captioned_at"),
+    salience: real("salience"),
+    // EmbeddingGemma vector of the summary, for semantic search. Half precision:
+    // at ~2,000 frames a day over 90 days this column is ≈ 280 MB instead of 550.
+    // No ANN index: searches are per device and usually per time range.
+    embedding: halfvec("embedding", { dimensions: 768 }),
   },
   (t) => [
     index("device_observations_device_captured_idx").on(t.deviceId, t.capturedAt),
     index("device_observations_received_idx").on(t.receivedAt),
+    index("device_observations_device_captioned_idx").on(t.deviceId, t.captionedAt),
   ]
 );
 
