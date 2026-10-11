@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 // Files the user uploads (images, pasted content) live in an "uploads/"
 // subfolder of the conversation's folder, so agent-written artifacts and user
 // uploads stay distinguishable without any bookkeeping outside the filesystem.
-const filesRoot = () => resolve(process.env.FILES_DIR ?? "data/files");
+export const filesRoot = () => resolve(process.env.FILES_DIR ?? "data/files");
 
 // Where a file came from: written by the agent's file tools, or uploaded by a
 // user. Maps to the on-disk location (uploads live under uploads/).

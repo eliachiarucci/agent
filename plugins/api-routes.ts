@@ -38,6 +38,7 @@ export const apiRoutesPlugin: Plugin = {
           "api/agent/connectors",
           "api/agent/connectors/gmail",
           "api/agent/connectors/google-calendar",
+          "api/agent/devices",
           "api/agent/files",
           "api/agent/jobs",
         ],

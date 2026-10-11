@@ -8,6 +8,8 @@ import { startCronScheduler } from './lib/agent/cron';
 import { auth } from './lib/global/auth';
 import { db } from './lib/global/db';
 import { backfillSearchText } from './lib/db/conversations';
+import { attachDeviceGateway } from './lib/devices/gateway';
+import { startDeviceRetention } from './lib/devices/retention';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 type HttpMethod = typeof HTTP_METHODS[number];
@@ -48,9 +50,12 @@ const main = async () => {
         }
     }
 
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
     });
+    // Device WebSockets (/agent/devices/ws) arrive as upgrades on the http
+    // server; the file-based routes can't take them.
+    attachDeviceGateway(server);
 
     // Warm up the in-process embedding model so the first turn isn't slow.
     preloadEmbedder();
@@ -59,6 +64,9 @@ const main = async () => {
     if (process.env.CRON !== 'off') {
         startCronScheduler();
     }
+
+    // Deletes device frames and observations past their retention, hourly.
+    startDeviceRetention();
 };
 
 main().catch((error) => {

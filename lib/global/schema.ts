@@ -15,6 +15,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql, type SQL } from "drizzle-orm";
 import type { ModelMessage, UIMessage } from "ai";
+import type { DeviceHello, DeviceTelemetry, FrameTrigger } from "../devices/protocol";
+import type { DeviceSettings } from "../devices/settings";
 
 // Postgres full-text-search vector. Drizzle has no native tsvector type, so we
 // declare a minimal one; it is only ever populated as a generated column, never
@@ -597,4 +599,88 @@ export const memories = pgTable(
     index("memories_category_idx").on(t.category),
     index("memories_pool_idx").on(t.poolId),
   ]
+);
+
+// ── Devices ──────────────────────────────────────────────────────────────────
+// Camera + speaker devices (the rover first) that stream frames to the agent
+// over one outbound WebSocket each (lib/devices/gateway.ts). A device belongs
+// to its owner; members of the device's agent can see its observations.
+
+// Authenticates the device's WebSocket. Only the SHA-256 of the token is
+// stored; the token itself is shown once, at registration or rotation
+// (lib/devices/tokens.ts). Settings are validated by zod at the API boundary
+// and read over the current defaults (lib/devices/settings.ts).
+export const devices = pgTable(
+  "devices",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    ownerId: uuid("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // The agent the device works for. NULL (agent deleted) = the device keeps
+    // streaming, but only its owner sees it.
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    tokenCreatedAt: timestamp("token_created_at").notNull().defaultNow(),
+    settings: jsonb("settings").notNull().$type<DeviceSettings>(),
+    // Last `hello` (service version, capabilities) and `telemetry` the device sent.
+    hello: jsonb("hello").$type<DeviceHello>(),
+    telemetry: jsonb("telemetry").$type<DeviceTelemetry>(),
+    lastSeenAt: timestamp("last_seen_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("devices_token_hash_idx").on(t.tokenHash),
+    index("devices_owner_idx").on(t.ownerId),
+    index("devices_agent_idx").on(t.agentId),
+  ]
+);
+
+// One row per frame the device sent. The JPEG lives on disk
+// (FILES_DIR/devices/<device id>/frames/<frame>); `frame` turns NULL when the
+// retention job deletes the image, and the row itself goes later
+// (lib/devices/retention.ts). `capturedAt` is the device's clock, `receivedAt`
+// the server's; retention runs on the server's.
+export const deviceObservations = pgTable(
+  "device_observations",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => devices.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    trigger: text("trigger").$type<FrameTrigger>().notNull(),
+    // Set when the frame answers a `capture` request.
+    requestId: text("request_id"),
+    capturedAt: timestamp("captured_at").notNull(),
+    receivedAt: timestamp("received_at").notNull().defaultNow(),
+    frame: text("frame"),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    bytes: integer("bytes").notNull(),
+  },
+  (t) => [
+    index("device_observations_device_captured_idx").on(t.deviceId, t.capturedAt),
+    index("device_observations_received_idx").on(t.receivedAt),
+  ]
+);
+
+export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error"] as const;
+export type DeviceEventKind = (typeof DEVICE_EVENT_KINDS)[number];
+
+// Device log: connections and protocol errors (speech joins it later).
+export const deviceEvents = pgTable(
+  "device_events",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => devices.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<DeviceEventKind>().notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("device_events_device_created_idx").on(t.deviceId, t.createdAt)]
 );
