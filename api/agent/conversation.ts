@@ -68,6 +68,9 @@ import {
 import { addToolApprovals } from "../../lib/db/tool-approvals";
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
+import { withPromptCache } from "../../lib/agent/prompt-cache";
+import { listDevicesForUser } from "../../lib/db/devices";
+import { buildObservationTools, observationToolsPrompt } from "../../lib/devices/observation-tools";
 import type { StoredMessage } from "../../lib/global/schema";
 
 function toUIMessages(stored: StoredMessage[]): UIMessage[] {
@@ -513,6 +516,11 @@ export const POST: express.RequestHandler = async (req, res) => {
         interactive: true,
     });
 
+    // Devices the sender can see (owned, or working for one of their agents):
+    // their camera timeline is searchable from any chat. Stable while the
+    // device list is, so the prompt prefix stays cache friendly.
+    const devices = await listDevicesForUser(user.id);
+
     const system = [
         basePrompt,
         agentPrompt,
@@ -524,6 +532,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         conversationSearchPrompt,
         connectorToolset.prompt,
         buildCronToolsPrompt(cronScope.timezone),
+        devices.length > 0 ? observationToolsPrompt : "",
     ]
         .filter(Boolean)
         .join("\n\n");
@@ -542,6 +551,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             currentConversationId: conversationId,
         }),
         ...connectorToolset.tools,
+        ...(devices.length > 0 ? buildObservationTools({ devices, timeZone: cronScope.timezone }) : {}),
     };
 
     // If the conversation was previously compacted, the model sees the stored
@@ -561,14 +571,8 @@ export const POST: express.RequestHandler = async (req, res) => {
         ignoreIncompleteToolCalls: true,
     });
 
-    // Anthropic prompt caching is opt-in per request (unlike LM Studio's and
-    // Gemini's implicit prefix caching): two ephemeral breakpoints — one on the system block (tools render
-    // before system, so it caches both) and one on the newest message, so each
-    // turn reads the whole prior conversation from cache (writes 1.25x, reads
-    // 0.1x, 5-min TTL). The prompt prefix is already byte-stable across turns
-    // (see docs/memory.md), which is exactly what the cache keys on.
-    const cacheBreakpoint = { anthropic: { cacheControl: { type: "ephemeral" as const } } };
-    const cached = provider === "anthropic";
+    // Anthropic prompt caching (lib/agent/prompt-cache.ts).
+    const prompt = withPromptCache(system, modelMessages, provider === "anthropic");
 
     const result = streamText({
         model: wrapLanguageModel({
@@ -577,14 +581,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             // reasoning_content. A no-op for providers with native reasoning parts.
             middleware: extractReasoningMiddleware({ tagName: "think" }),
         }),
-        system: cached ? undefined : system,
-        messages: cached
-            ? [
-                  { role: "system" as const, content: system, providerOptions: cacheBreakpoint },
-                  ...modelMessages.slice(0, -1),
-                  ...modelMessages.slice(-1).map((m) => ({ ...m, providerOptions: cacheBreakpoint })),
-              ]
-            : modelMessages,
+        ...prompt,
         tools,
         // Search → read → answer flows need more steps than memory-only turns.
         stopWhen: stepCountIs(8),

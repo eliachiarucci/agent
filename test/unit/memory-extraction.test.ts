@@ -209,4 +209,39 @@ describe("memory extraction settings", () => {
       system: "Only remember birthdays.",
     });
   });
+
+  it("labels device reports as observations and uses the device default prompt", async () => {
+    const { agent, conv, scope } = await setupConversation();
+
+    const p1 = runMemoryExtraction({
+      conversationId: conv.id,
+      scope,
+      messages: turn("<device-context>a cat on the wall</device-context>"),
+      label: "Rover observation",
+      source: "device",
+      defaultPrompt: "Device prompt.",
+    });
+    await vi.waitFor(() => expect(h.generateText).toHaveBeenCalledTimes(1));
+    releaseNext();
+    await p1;
+    const call = h.generateText.mock.calls[0][0] as any;
+    expect(call.system).toBe("Device prompt.");
+    // The report isn't attributed to the owner.
+    expect(call.messages.at(-1).content).toMatch(/^Rover observation: <device-context>/);
+    expect(call.messages.at(-1).content).not.toContain("Elia:");
+
+    // The agent's own prompt still wins.
+    await updateAgent(agent.id, { memoryExtractionPrompt: "Only remember birthdays." });
+    const p2 = runMemoryExtraction({
+      conversationId: conv.id,
+      scope,
+      messages: turn("report"),
+      label: "Rover observation",
+      defaultPrompt: "Device prompt.",
+    });
+    await vi.waitFor(() => expect(h.generateText).toHaveBeenCalledTimes(2));
+    releaseNext();
+    await p2;
+    expect((h.generateText.mock.calls[1][0] as any).system).toBe("Only remember birthdays.");
+  });
 });

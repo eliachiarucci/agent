@@ -8,6 +8,7 @@ import {
   settleWaitingCaption,
   updateCaption,
   type Device,
+  type DeviceObservation,
 } from "../db/devices";
 import type { CaptionStatus } from "../global/schema";
 import { captionFrame, type Caption, type CaptionResult } from "./caption";
@@ -39,8 +40,12 @@ const defaultDeps: PerceptionDeps = {
   now: () => new Date(),
 };
 
+// Called with each observation once its caption has settled (any status).
+export type CaptionListener = (deviceId: string, observation: DeviceObservation) => void;
+
 type DeviceQueue = {
-  pending: string | null;
+  // A requested frame (someone is waiting for it) isn't superseded by change frames.
+  pending: { id: string; priority: boolean } | null;
   running: Promise<void> | null;
   // The last caption, the model's "previous description". Undefined until
   // loaded from the database on the first frame after a restart.
@@ -49,16 +54,50 @@ type DeviceQueue = {
 
 export class PerceptionWorker {
   private queues = new Map<string, DeviceQueue>();
+  private listeners = new Set<CaptionListener>();
 
   constructor(private readonly deps: PerceptionDeps = defaultDeps) {}
 
   /** Queues a stored frame for captioning, replacing any frame still waiting. */
-  enqueue(deviceId: string, observationId: string): void {
+  enqueue(deviceId: string, observationId: string, options: { priority?: boolean } = {}): void {
     const queue = this.queues.get(deviceId) ?? { pending: null, running: null };
     this.queues.set(deviceId, queue);
-    if (queue.pending) this.settle(deviceId, queue.pending, "superseded");
-    queue.pending = observationId;
+    const priority = options.priority ?? false;
+    if (queue.pending?.priority && !priority) {
+      this.settle(deviceId, observationId, "superseded");
+    } else {
+      if (queue.pending) this.settle(deviceId, queue.pending.id, "superseded");
+      queue.pending = { id: observationId, priority };
+    }
     queue.running ??= this.drain(deviceId, queue);
+  }
+
+  /** Subscribes to settled captions; returns the unsubscribe function. */
+  onSettled(listener: CaptionListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Resolves with the observation once its caption has settled, or null on timeout. */
+  async waitFor(observationId: string, timeoutMs: number): Promise<DeviceObservation | null> {
+    let unsubscribe = () => {};
+    const settled = new Promise<DeviceObservation>((resolve) => {
+      unsubscribe = this.onSettled((_deviceId, row) => {
+        if (row.id === observationId) resolve(row);
+      });
+    });
+    try {
+      // It may have settled before the subscription.
+      const current = await getObservation(observationId);
+      if (!current || current.captionStatus !== null) return current ?? null;
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), timeoutMs)));
+      const result = await Promise.race([settled, timeout]);
+      clearTimeout(timer);
+      return result;
+    } finally {
+      unsubscribe();
+    }
   }
 
   /** Resolves once the device's queue is empty (for tests and shutdown). */
@@ -74,7 +113,7 @@ export class PerceptionWorker {
 
   private async drain(deviceId: string, queue: DeviceQueue): Promise<void> {
     while (queue.pending) {
-      const observationId = queue.pending;
+      const observationId = queue.pending.id;
       queue.pending = null;
       try {
         await this.process(deviceId, observationId, queue);
@@ -95,7 +134,18 @@ export class PerceptionWorker {
 
   private async publish(deviceId: string, observationId: string): Promise<void> {
     const row = await getObservation(observationId);
-    if (row) publishLive(deviceId, { type: "caption", observation: publicObservation(row) });
+    if (row) this.announce(deviceId, row);
+  }
+
+  private announce(deviceId: string, row: DeviceObservation): void {
+    publishLive(deviceId, { type: "caption", observation: publicObservation(row) });
+    for (const listener of this.listeners) {
+      try {
+        listener(deviceId, row);
+      } catch (error) {
+        console.error("Caption listener failed:", error);
+      }
+    }
   }
 
   private async process(deviceId: string, observationId: string, queue: DeviceQueue): Promise<void> {
@@ -155,7 +205,7 @@ export class PerceptionWorker {
     changes: Parameters<typeof updateCaption>[1]
   ): Promise<void> {
     const row = await updateCaption(observationId, changes);
-    if (row) publishLive(deviceId, { type: "caption", observation: publicObservation(row) });
+    if (row) this.announce(deviceId, row);
   }
 }
 

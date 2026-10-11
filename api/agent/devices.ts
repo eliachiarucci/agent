@@ -1,6 +1,9 @@
 import express from 'express';
 import { z } from "zod";
-import { getSessionUser, resolveActor } from "../../lib/agent/actor";
+import { getSessionUser, resolveActor, type SessionUser } from "../../lib/agent/actor";
+import { createAgentOnPool, getDefaultAgentForUser, listAgentMembers, type Agent } from "../../lib/db/agents";
+import { getMemoryPool } from "../../lib/db/memory-pools";
+import { deviceRunner } from "../../lib/devices/runner";
 import { createDevice, deleteDevice, listDevicesForUser, updateDevice } from "../../lib/db/devices";
 import { deviceRole, publicDevice, resolveDeviceAccess } from "../../lib/devices/access";
 import { removeDeviceFiles } from "../../lib/devices/frames";
@@ -10,6 +13,7 @@ import { perceptionWorker } from "../../lib/devices/perception";
 import {
     DEFAULT_DEVICE_SETTINGS,
     deviceSettingsPatchSchema,
+    deviceSettingsSchema,
     mergeDeviceSettings,
     readDeviceSettings,
 } from "../../lib/devices/settings";
@@ -37,11 +41,21 @@ export const GET: express.RequestHandler = async (req, res) => {
     );
 }
 
-const createSchema = z.object({
-    name: z.string().trim().min(1).max(100),
-    // The agent the device works for; defaults to the user's oldest agent.
-    agent_id: z.uuid().optional(),
-});
+const createSchema = z
+    .object({
+        name: z.string().trim().min(1).max(100),
+        // An existing agent for the device to work for. Without it, a new agent
+        // named after the device is created (plan 4.6, D3).
+        agent_id: z.uuid().optional(),
+        // The new agent's memory pool (one the user owns); defaults to the pool
+        // of the user's default agent, the Personal Assistant.
+        memory_pool_id: z.uuid().optional(),
+        // IANA zone for the daily log and quiet hours; the server's when omitted.
+        timezone: deviceSettingsSchema.shape.timezone.optional(),
+    })
+    .refine((d) => !(d.agent_id && d.memory_pool_id), {
+        message: "memory_pool_id only applies to a new agent; leave out agent_id",
+    });
 
 // Registers a device. The token is in this response only: store it on the
 // device (the server keeps just its hash).
@@ -51,22 +65,56 @@ export const POST: express.RequestHandler = async (req, res) => {
         res.status(400).json({ error: parsed.error.issues });
         return;
     }
+    const { name, agent_id, memory_pool_id, timezone } = parsed.data;
 
-    const actor = await resolveActor(req, parsed.data.agent_id);
-    if (!actor.ok) {
-        res.status(actor.status).json({ error: actor.error });
-        return;
+    let agent: Agent;
+    let user: SessionUser;
+    if (agent_id) {
+        const actor = await resolveActor(req, agent_id);
+        if (!actor.ok) {
+            res.status(actor.status).json({ error: actor.error });
+            return;
+        }
+        ({ agent, user } = actor);
+    } else {
+        const sessionUser = await getSessionUser(req);
+        if (!sessionUser) {
+            res.status(401).json({ error: "Not authenticated" });
+            return;
+        }
+        user = sessionUser;
+        let poolId: string | null;
+        let memberIds: string[] = [];
+        if (memory_pool_id) {
+            const pool = await getMemoryPool(memory_pool_id);
+            if (!pool || pool.ownerId !== user.id) {
+                res.status(404).json({ error: "Memory pool not found" });
+                return;
+            }
+            poolId = pool.id;
+        } else {
+            // The Personal Assistant's pool, shared with the same people, so
+            // `remember` can name them and they see what the device stores.
+            const personal = await getDefaultAgentForUser(user.id);
+            poolId = personal?.memoryPoolId ?? null;
+            if (personal) memberIds = (await listAgentMembers(personal.id)).map((m) => m.userId);
+        }
+        agent = await createAgentOnPool({ name, ownerId: user.id, memoryPoolId: poolId, memberIds });
     }
 
     const { token, hash } = generateDeviceToken();
     const device = await createDevice({
-        ownerId: actor.user.id,
-        agentId: actor.agent.id,
-        name: parsed.data.name,
+        ownerId: user.id,
+        agentId: agent.id,
+        name,
         tokenHash: hash,
-        settings: DEFAULT_DEVICE_SETTINGS,
+        settings: { ...DEFAULT_DEVICE_SETTINGS, timezone: timezone ?? null },
     });
-    res.status(201).json({ device: publicDevice(device, "owner"), token });
+    res.status(201).json({
+        device: publicDevice(device, "owner"),
+        agent: { id: agent.id, name: agent.name, memoryPoolId: agent.memoryPoolId },
+        token,
+    });
 }
 
 const updateSchema = z.object({
@@ -126,6 +174,7 @@ export const DELETE: express.RequestHandler = async (req, res) => {
     await deleteDevice(parsed.data.id);
     await removeDeviceFiles(parsed.data.id);
     perceptionWorker.forget(parsed.data.id);
+    deviceRunner.forget(parsed.data.id);
     publishLive(parsed.data.id, { type: "deleted" });
     res.status(204).end();
 }

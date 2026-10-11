@@ -16,6 +16,7 @@ import { getMemoryConversation, saveMemoryConversation } from "../db/memory-conv
 import { ATTACHED_FILES_MARKER } from "./files";
 import { compactMemoryLog, usageTokens } from "./compaction";
 import type { ContextTarget } from "./context";
+import type { MemorySource } from "../global/schema";
 
 // A dedicated model whose only job is to mine durable facts out of chats. It
 // runs in the background after every turn (the main chat model still has its
@@ -84,6 +85,14 @@ type ExtractionParams = {
   conversationId: string;
   scope: MemoryScope;
   messages: UIMessage[];
+  // Who the user message is from, as the extractor reads it; the speaker's
+  // name by default. Device runs pass e.g. "Rover observation", so camera
+  // captions aren't attributed to the owner (plan 4.5).
+  label?: string;
+  // Tags what the extractor stores (device runs: "device").
+  source?: MemorySource;
+  // Used when the agent has no extraction prompt of its own.
+  defaultPrompt?: string;
 };
 
 // Serialize extractions per source conversation. Each call read-modify-writes
@@ -132,7 +141,7 @@ async function extractTurn(params: ExtractionParams): Promise<void> {
   // The latest exchange framed as one user turn for the extractor. The person's
   // own words carry the facts; the assistant's reply is context.
   const exchange = [
-    `${scope.speaker.name}: ${userText}`,
+    `${params.label ?? scope.speaker.name}: ${userText}`,
     assistantText ? `Assistant: ${assistantText}` : "",
   ]
     .filter(Boolean)
@@ -159,10 +168,10 @@ async function extractTurn(params: ExtractionParams): Promise<void> {
       model: memoryModel,
       middleware: extractReasoningMiddleware({ tagName: "think" }),
     }),
-    system: agent.memoryExtractionPrompt ?? MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    system: agent.memoryExtractionPrompt ?? params.defaultPrompt ?? MEMORY_EXTRACTION_SYSTEM_PROMPT,
     messages: history,
     // Only the memory tools — the extractor reads and writes memory, nothing else.
-    tools: buildMemoryTools(scope),
+    tools: buildMemoryTools(scope, { source: params.source }),
     stopWhen: stepCountIs(8),
   });
 

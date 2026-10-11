@@ -8,6 +8,7 @@ services:
     environment:
       - DATABASE_URL=postgres://postgres:postgres@db:5432/agent
       - SEARXNG_URL=http://searxng:8080
+      - PIPER_URL=http://piper:5000
     depends_on:
       db:
         condition: service_healthy
@@ -19,6 +20,13 @@ services:
       - "8888:8080"
     volumes:
       - ./docker/searxng:/etc/searxng
+    restart: unless-stopped
+
+  # Device speech (lib/devices/tts.ts). 5050 on the host: macOS keeps 5000 for AirPlay.
+  piper:
+    build: ./docker/piper
+    ports:
+      - "5050:5000"
     restart: unless-stopped
 
   db:

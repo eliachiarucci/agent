@@ -12,6 +12,7 @@ import {
 export type Device = typeof devices.$inferSelect;
 export type NewDevice = typeof devices.$inferInsert;
 export type NewDeviceObservation = typeof deviceObservations.$inferInsert;
+export type DeviceEvent = typeof deviceEvents.$inferSelect;
 
 // Observations are read without their embedding (1.5 KB each, only search needs it).
 const { embedding: _embedding, ...observationColumns } = getTableColumns(deviceObservations);
@@ -96,6 +97,8 @@ export type ObservationQuery = {
   to?: Date;
   before?: Date;
   minSalience?: number;
+  // Only frames with a caption.
+  captioned?: boolean;
   limit: number;
 };
 
@@ -105,7 +108,8 @@ const observationFilter = (query: ObservationQuery) =>
     query.from && gte(deviceObservations.capturedAt, query.from),
     query.to && lte(deviceObservations.capturedAt, query.to),
     query.before && lt(deviceObservations.capturedAt, query.before),
-    query.minSalience !== undefined ? gte(deviceObservations.salience, query.minSalience) : undefined
+    query.minSalience !== undefined ? gte(deviceObservations.salience, query.minSalience) : undefined,
+    query.captioned ? eq(deviceObservations.captionStatus, "captioned") : undefined
   );
 
 /** Newest first. `before` pages backwards by capture time. */
@@ -221,8 +225,67 @@ export async function insertDeviceEvent(
   deviceId: string,
   kind: DeviceEventKind,
   detail?: Record<string, unknown>
-): Promise<void> {
-  await db.insert(deviceEvents).values({ deviceId, kind, detail });
+): Promise<DeviceEvent> {
+  const [row] = await db.insert(deviceEvents).values({ deviceId, kind, detail }).returning();
+  return row;
+}
+
+/** Newest first. */
+export async function listDeviceEvents(query: {
+  deviceId: string;
+  kind: DeviceEventKind;
+  since?: Date;
+  limit: number;
+}): Promise<DeviceEvent[]> {
+  return db
+    .select()
+    .from(deviceEvents)
+    .where(
+      and(
+        eq(deviceEvents.deviceId, query.deviceId),
+        eq(deviceEvents.kind, query.kind),
+        query.since && gte(deviceEvents.createdAt, query.since)
+      )
+    )
+    .orderBy(desc(deviceEvents.createdAt), desc(deviceEvents.id))
+    .limit(query.limit);
+}
+
+/** Events of a kind since `since` whose detail.status is one of `statuses`. */
+export async function countDeviceEvents(
+  deviceId: string,
+  kind: DeviceEventKind,
+  since: Date,
+  statuses: string[]
+): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(deviceEvents)
+    .where(
+      and(
+        eq(deviceEvents.deviceId, deviceId),
+        eq(deviceEvents.kind, kind),
+        gte(deviceEvents.createdAt, since),
+        inArray(sql<string>`${deviceEvents.detail}->>'status'`, statuses)
+      )
+    );
+  return row.n;
+}
+
+/** Captions since `since` that the model marked worth logging (wake "log" or "agent"). */
+export async function countNotableSince(deviceId: string, since: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(deviceObservations)
+    .where(
+      and(
+        eq(deviceObservations.deviceId, deviceId),
+        eq(deviceObservations.captionStatus, "captioned"),
+        gte(deviceObservations.capturedAt, since),
+        inArray(sql<string>`${deviceObservations.caption}->>'wake'`, ["log", "agent"])
+      )
+    );
+  return row.n;
 }
 
 export async function deleteDeviceEventsBefore(deviceId: string, cutoff: Date): Promise<number> {

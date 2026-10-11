@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   boolean,
   customType,
   halfvec,
@@ -242,11 +243,15 @@ export const conversations = pgTable(
     // Auto-compaction pointer (NULL until the conversation first crosses the
     // context threshold); see CompactionState above and lib/agent/compaction.ts.
     compaction: jsonb("compaction").$type<CompactionState>(),
+    // Set on a device's daily log (lib/agent/device-run.ts): the conversation
+    // its agent runs append to. Kept when the device is deleted.
+    deviceId: uuid("device_id").references((): AnyPgColumn => devices.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [
     index("conversations_agent_idx").on(t.agentId),
+    index("conversations_device_idx").on(t.deviceId, t.createdAt),
     index("conversations_search_idx").using("gin", t.searchVector),
   ]
 );
@@ -567,10 +572,18 @@ export const MEMORY_CATEGORIES = [
   "culture",
   "funny",
   "place",
+  "home",
+  "animal",
   "other",
 ] as const;
 
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
+
+// Where a memory came from: a chat (the chat model or extraction from a chat),
+// or a device's agent runs, whose input is camera captions — untrusted, so
+// these can be reviewed and filtered apart (plan 4.2).
+export const MEMORY_SOURCES = ["chat", "device"] as const;
+export type MemorySource = (typeof MEMORY_SOURCES)[number];
 
 export const memories = pgTable(
   "memories",
@@ -593,6 +606,7 @@ export const memories = pgTable(
     importance: real("importance").notNull(),
     category: text("category").$type<MemoryCategory>().notNull(),
     pinned: boolean("pinned").notNull().default(false),
+    source: text("source").$type<MemorySource>().notNull().default("chat"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     lastAccessedAt: timestamp("last_accessed_at").notNull().defaultNow(),
   },
@@ -704,10 +718,12 @@ export const deviceObservations = pgTable(
   ]
 );
 
-export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error"] as const;
+// "speech": something the device was asked to say (and whether it played);
+// "run": an agent run, or one skipped (lib/agent/device-run.ts).
+export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error", "speech", "run"] as const;
 export type DeviceEventKind = (typeof DEVICE_EVENT_KINDS)[number];
 
-// Device log: connections and protocol errors (speech joins it later).
+// Device log: connections, protocol errors, speech and agent runs.
 export const deviceEvents = pgTable(
   "device_events",
   {

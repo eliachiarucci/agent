@@ -96,6 +96,14 @@ export async function deleteMessage(id: string): Promise<Conversation | undefine
   return row;
 }
 
+/** The newest conversation a device's agent runs wrote to (its daily log). */
+export async function latestDeviceConversation(deviceId: string): Promise<Conversation | undefined> {
+  return db.query.conversations.findFirst({
+    where: eq(conversations.deviceId, deviceId),
+    orderBy: [desc(conversations.createdAt), desc(conversations.id)],
+  });
+}
+
 export async function findMessage(id: string): Promise<Conversation | undefined> {
   return db.query.conversations.findFirst({
     where: eq(conversations.id, id),

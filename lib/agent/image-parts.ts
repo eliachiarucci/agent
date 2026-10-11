@@ -55,3 +55,36 @@ export async function inlineImageFileParts(
     })
   );
 }
+
+// What a user message's metadata may say about its images: a short text
+// stand-in per file name, e.g. "frame 15:02: a fox crosses the lawn".
+export type ImageLabelsMetadata = { imageLabels?: Record<string, string> };
+
+/**
+ * Model-view transform for long image-heavy logs (a device's daily log):
+ * images in user messages older than the last `keep` messages that carry any
+ * are replaced by their text label. A message's replacement depends only on
+ * its own metadata, so once an image leaves the window the prompt prefix up
+ * to it stays byte-identical (prompt caching keeps working).
+ */
+export function windowImageParts(messages: UIMessage[], keep = 2): UIMessage[] {
+  const withImages = messages.flatMap((m, i) =>
+    m.role === "user" && m.parts.some((p) => p.type === "file") ? [i] : []
+  );
+  const outside = new Set(withImages.slice(0, Math.max(0, withImages.length - keep)));
+  return messages.map((message, i) => {
+    if (!outside.has(i)) return message;
+    const labels = (message.metadata as ImageLabelsMetadata | undefined)?.imageLabels ?? {};
+    return {
+      ...message,
+      parts: message.parts.map((part) =>
+        part.type === "file"
+          ? {
+              type: "text" as const,
+              text: `[${(part.filename && labels[part.filename]) || `image ${part.filename ?? ""}`.trim()}]`,
+            }
+          : part
+      ),
+    };
+  });
+}

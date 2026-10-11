@@ -4,11 +4,16 @@
 // through ffmpeg, and plays speech it receives with afplay.
 //
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --dir ../rover2/radxa_software/captures/bench-20261011/frames --match 2576x1449
+//   DEVICE_TOKEN=dev_… npm run device-sim -- --files empty.jpg,empty.jpg,person.jpg --no-loop
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --webcam [--camera 0] [--size 1280x720]
 //
 // Options: --url (default ws://localhost:3001/agent/devices/ws); --interval,
 // seconds between frames (default 2; never faster than the server's
-// minIntervalMs); --match, to stream only the JPEGs whose name contains it.
+// minIntervalMs); --match, to stream only the JPEGs whose name contains it;
+// --files, a comma-separated list of JPEGs played in that order (a scripted
+// scene); --no-loop, to stop sending change frames after the last one (capture
+// requests still get it). A capture request with a region gets that region of
+// the current frame, cropped (the rover renders it from the full sensor frame).
 // The token comes from DEVICE_TOKEN, so it stays out of the shell history;
 // register a device with POST /agent/devices to get one.
 import { spawn, type ChildProcess } from "node:child_process";
@@ -16,6 +21,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import sharp from "sharp";
 import WebSocket from "ws";
 import { decodeBinaryMessage, encodeBinaryMessage, type DeviceConfig, type FrameTrigger } from "../lib/devices/protocol";
 
@@ -23,6 +29,8 @@ const { values: args } = parseArgs({
   options: {
     url: { type: "string", default: "ws://localhost:3001/agent/devices/ws" },
     dir: { type: "string" },
+    files: { type: "string" },
+    "no-loop": { type: "boolean", default: false },
     match: { type: "string", default: "" },
     webcam: { type: "boolean", default: false },
     camera: { type: "string", default: "0" },
@@ -33,7 +41,9 @@ const { values: args } = parseArgs({
 
 const token = process.env.DEVICE_TOKEN;
 if (!token) fail("Set DEVICE_TOKEN to the token from POST /agent/devices.");
-if (!args.dir === !args.webcam) fail("Pick one source: --dir <folder of JPEGs> or --webcam.");
+if ([args.dir, args.files, args.webcam].filter(Boolean).length !== 1) {
+  fail("Pick one source: --dir <folder of JPEGs>, --files <a.jpg,b.jpg,…> or --webcam.");
+}
 
 const intervalMs = Number(args.interval) * 1000;
 if (!(intervalMs > 0)) fail("--interval must be a positive number of seconds.");
@@ -53,14 +63,28 @@ const startedAt = Date.now();
 
 // ── Frame sources ────────────────────────────────────────────────────────────
 
-type Source = { next(): Promise<Buffer | null> };
+// next() advances to the following frame (null when a --no-loop scene is
+// over); current() is the frame on screen, for capture requests.
+type Source = { next(): Promise<Buffer | null>; current(): Promise<Buffer | null> };
+
+function listSource(paths: string[], label: string): Source {
+  const loop = !args["no-loop"];
+  console.log(`Streaming ${paths.length} JPEGs from ${label}${loop ? ", in a loop" : ", once"}`);
+  let i = -1;
+  return {
+    next: async () => {
+      if (!loop && i >= paths.length - 1) return null;
+      i = (i + 1) % paths.length;
+      return readFile(paths[i]);
+    },
+    current: () => readFile(paths[Math.max(i, 0)]),
+  };
+}
 
 async function folderSource(dir: string): Promise<Source> {
   const names = (await readdir(dir)).filter((n) => /\.jpe?g$/i.test(n) && n.includes(args.match!)).sort();
   if (names.length === 0) fail(`No JPEGs in ${dir}`);
-  console.log(`Streaming ${names.length} JPEGs from ${dir}, in a loop`);
-  let i = 0;
-  return { next: () => readFile(join(dir, names[i++ % names.length])) };
+  return listSource(names.map((n) => join(dir, n)), dir);
 }
 
 // ffmpeg writes a stream of JPEGs to stdout; keep only the newest one.
@@ -88,7 +112,7 @@ function webcamSource(camera: string, size: string): Source {
   });
   process.on("exit", () => ffmpeg.kill());
   console.log(`Streaming webcam ${camera} at ${size}`);
-  return { next: async () => latest };
+  return { next: async () => latest, current: async () => latest };
 }
 
 // ── Link ─────────────────────────────────────────────────────────────────────
@@ -129,7 +153,7 @@ function connect(source: Source): void {
         break;
       }
       case "capture":
-        void sendFrame(source, "request", message.requestId);
+        void sendCapture(source, message.requestId, message.region);
         break;
       case "stop_speech":
         player?.kill();
@@ -159,6 +183,33 @@ async function sendFrame(source: Source, trigger: FrameTrigger, requestId?: stri
   const header = { type: "frame", seq: seq++, capturedAt: Date.now(), trigger, ...(requestId && { requestId }) };
   ws.send(encodeBinaryMessage(header, bytes));
   console.log(`Sent frame ${header.seq} (${trigger}, ${(bytes.length / 1024).toFixed(0)} KB)`);
+}
+
+// The answer to a capture request: the current frame, or a region of it.
+async function sendCapture(
+  source: Source,
+  requestId: string,
+  region?: { x: number; y: number; w: number; h: number }
+): Promise<void> {
+  let bytes = await source.current();
+  if (!bytes || ws?.readyState !== WebSocket.OPEN) return;
+  if (region) {
+    const { width = 0, height = 0 } = await sharp(bytes).metadata();
+    const left = Math.min(Math.round(region.x * width), width - 1);
+    const top = Math.min(Math.round(region.y * height), height - 1);
+    bytes = await sharp(bytes)
+      .extract({
+        left,
+        top,
+        width: Math.max(1, Math.min(Math.round(region.w * width), width - left)),
+        height: Math.max(1, Math.min(Math.round(region.h * height), height - top)),
+      })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+  }
+  const header = { type: "frame", seq: seq++, capturedAt: Date.now(), trigger: "request", requestId };
+  ws.send(encodeBinaryMessage(header, bytes));
+  console.log(`Sent ${region ? "crop" : "frame"} ${header.seq} for request ${requestId} (${(bytes.length / 1024).toFixed(0)} KB)`);
 }
 
 function sendTelemetry(): void {
@@ -198,7 +249,11 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-const source = args.dir ? await folderSource(args.dir) : webcamSource(args.camera!, args.size!);
+const source = args.dir
+  ? await folderSource(args.dir)
+  : args.files
+    ? listSource(args.files.split(",").filter(Boolean), "--files")
+    : webcamSource(args.camera!, args.size!);
 connect(source);
 
 // The frame clock: the requested interval, never faster than the server allows.

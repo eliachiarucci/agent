@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { DeviceObservation } from "../db/devices";
+import type { DeviceEvent, DeviceObservation } from "../db/devices";
 
 // In-process fan-out of what happens on a device, for GET /agent/devices/live
 // (SSE). The app runs as one process, so an EventEmitter is enough.
@@ -9,6 +9,9 @@ export type LiveEvent =
   // A frame arrived, and later its caption settled (captioned, failed, …).
   | { type: "observation"; observation: PublicObservation }
   | { type: "caption"; observation: PublicObservation }
+  // Something was said through the device (or refused), and an agent run finished.
+  | { type: "speech"; event: DeviceEvent }
+  | { type: "run"; event: DeviceEvent }
   | { type: "deleted" };
 
 export type PublicObservation = Omit<DeviceObservation, "frame"> & { hasFrame: boolean };

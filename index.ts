@@ -10,6 +10,7 @@ import { db } from './lib/global/db';
 import { backfillSearchText } from './lib/db/conversations';
 import { attachDeviceGateway } from './lib/devices/gateway';
 import { startDeviceRetention } from './lib/devices/retention';
+import { startDeviceRuns } from './lib/devices/runner';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'] as const;
 type HttpMethod = typeof HTTP_METHODS[number];
@@ -67,6 +68,9 @@ const main = async () => {
 
     // Deletes device frames and observations past their retention, hourly.
     startDeviceRetention();
+
+    // Device agent runs: woken by captions and by the reflection timer.
+    startDeviceRuns();
 };
 
 main().catch((error) => {

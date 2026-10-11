@@ -38,6 +38,32 @@ export async function createAgent(data: { name: string; ownerId: string }): Prom
   });
 }
 
+/**
+ * An agent attached to an existing memory pool (or none) instead of a new one:
+ * a device's agent shares the Personal Assistant's memories (plan 4.6). The
+ * owner's membership and any extra members are added in the same transaction.
+ */
+export async function createAgentOnPool(data: {
+  name: string;
+  ownerId: string;
+  memoryPoolId: string | null;
+  memberIds?: string[];
+}): Promise<Agent> {
+  return db.transaction(async (tx) => {
+    const [agent] = await tx
+      .insert(agents)
+      .values({ name: data.name, ownerId: data.ownerId, memoryPoolId: data.memoryPoolId })
+      .returning();
+    await tx.insert(agentMembers).values([
+      { agentId: agent.id, userId: data.ownerId, role: "owner" as const },
+      ...(data.memberIds ?? [])
+        .filter((id) => id !== data.ownerId)
+        .map((userId) => ({ agentId: agent.id, userId, role: "member" as const })),
+    ]);
+    return agent;
+  });
+}
+
 export async function getAgent(id: string): Promise<Agent | undefined> {
   return db.query.agents.findFirst({ where: eq(agents.id, id) });
 }

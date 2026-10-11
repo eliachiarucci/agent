@@ -2,6 +2,7 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
+  type DeviceObservation,
   getDeviceByTokenHash,
   insertDeviceEvent,
   insertObservation,
@@ -13,8 +14,12 @@ import {
   ProtocolError,
   decodeBinaryMessage,
   deviceTextMessageSchema,
+  encodeBinaryMessage,
   frameHeaderSchema,
+  type CaptureRegion,
+  type DevicePlayed,
   type ServerTextMessage,
+  type SpeechHeader,
 } from "./protocol";
 import { InvalidFrameError, MAX_FRAME_BYTES, inspectJpeg, removeFrame, writeFrame } from "./frames";
 import { publicObservation, publishLive } from "./live";
@@ -57,6 +62,38 @@ type Connection = {
 
 const connections = new Map<string, Connection>();
 
+export class DeviceOfflineError extends Error {
+  constructor() {
+    super("The device is offline");
+  }
+}
+
+// Requests waiting for the device's answer: frames for `capture`, acks for
+// `speech`. Keyed by the id sent with the request; settled on the answer, on
+// timeout, or when the connection goes.
+export type CaptureResult =
+  | { kind: "overview"; observation: DeviceObservation }
+  | { kind: "crop"; image: Buffer; width: number; height: number };
+
+type PendingCapture = {
+  deviceId: string;
+  crop: boolean;
+  resolve: (result: CaptureResult) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+};
+type PendingSpeech = {
+  deviceId: string;
+  resolve: (played: DevicePlayed) => void;
+  timer: NodeJS.Timeout;
+};
+const captures = new Map<string, PendingCapture>();
+const speeches = new Map<string, PendingSpeech>();
+
+const CAPTURE_TIMEOUT_MS = 15_000;
+// The ack comes after playback, so the wait is the clip's length plus this.
+const SPEECH_ACK_MS = 30_000;
+
 export type DeviceLinkStatus = { online: boolean; connectedAt: Date | null };
 
 export function deviceLinkStatus(deviceId: string): DeviceLinkStatus {
@@ -78,10 +115,81 @@ export function disconnectDevice(deviceId: string, code: number, reason: string)
   if (connection) close(connection, code, reason);
 }
 
+/**
+ * Asks the device for a fresh frame: the overview (stored and captioned like any
+ * frame, ahead of change frames) or, with a region, a full-resolution crop that
+ * is returned without being stored.
+ */
+export function requestCapture(
+  deviceId: string,
+  options: { region?: CaptureRegion; timeoutMs?: number } = {}
+): Promise<CaptureResult> {
+  const connection = connections.get(deviceId);
+  if (!connection) return Promise.reject(new DeviceOfflineError());
+  const requestId = crypto.randomUUID();
+  return new Promise<CaptureResult>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      captures.delete(requestId);
+      reject(new Error("The device didn't send the frame in time"));
+    }, options.timeoutMs ?? CAPTURE_TIMEOUT_MS);
+    captures.set(requestId, { deviceId, crop: !!options.region, resolve, reject, timer });
+    send(connection.ws, { type: "capture", requestId, ...(options.region && { region: options.region }) });
+  });
+}
+
+/** Sends audio to the device and resolves with its `played` ack (ok: false on timeout or disconnect). */
+export function sendSpeech(
+  deviceId: string,
+  speech: { format: SpeechHeader["format"]; sampleRate: number; audio: Uint8Array; durationMs: number }
+): Promise<DevicePlayed> {
+  const connection = connections.get(deviceId);
+  if (!connection) return Promise.reject(new DeviceOfflineError());
+  const speechId = crypto.randomUUID();
+  return new Promise<DevicePlayed>((resolve) => {
+    const timer = setTimeout(() => {
+      speeches.delete(speechId);
+      resolve({ speechId, ok: false, error: "No answer from the device" });
+    }, speech.durationMs + SPEECH_ACK_MS);
+    speeches.set(speechId, { deviceId, resolve, timer });
+    const header: SpeechHeader = {
+      type: "speech",
+      speechId,
+      format: speech.format,
+      sampleRate: speech.sampleRate,
+    };
+    connection.ws.send(encodeBinaryMessage(header, speech.audio));
+  });
+}
+
+/** Stops whatever the device is playing. */
+export function stopSpeech(deviceId: string): boolean {
+  const connection = connections.get(deviceId);
+  if (!connection) return false;
+  send(connection.ws, { type: "stop_speech" });
+  return true;
+}
+
+// The connection is gone: nothing it was asked for will come.
+function failPending(deviceId: string): void {
+  for (const [id, pending] of captures) {
+    if (pending.deviceId !== deviceId) continue;
+    clearTimeout(pending.timer);
+    captures.delete(id);
+    pending.reject(new DeviceOfflineError());
+  }
+  for (const [id, pending] of speeches) {
+    if (pending.deviceId !== deviceId) continue;
+    clearTimeout(pending.timer);
+    speeches.delete(id);
+    pending.resolve({ speechId: id, ok: false, error: "The device disconnected" });
+  }
+}
+
 function close(connection: Connection, code: number, reason: string): void {
   connection.closedWith = code;
   if (connections.get(connection.deviceId) === connection) {
     connections.delete(connection.deviceId);
+    failPending(connection.deviceId);
     publishLive(connection.deviceId, { type: "status", online: false });
   }
   connection.ws.close(code, reason);
@@ -202,6 +310,7 @@ function onConnection(
   ws.on("close", (code: number) => {
     if (connections.get(deviceId) === connection) {
       connections.delete(deviceId);
+      failPending(deviceId);
       publishLive(deviceId, { type: "status", online: false });
     }
     // A deleted device has no row left to log against.
@@ -224,9 +333,23 @@ async function onText(connection: Connection, data: Buffer): Promise<void> {
   const parsed = deviceTextMessageSchema.safeParse(json);
   if (!parsed.success) throw new ProtocolError("Unknown or malformed message");
 
-  const { type, ...body } = parsed.data;
-  if (type === "hello") await touchDevice(connection.deviceId, { hello: body });
-  else await touchDevice(connection.deviceId, { telemetry: body });
+  const message = parsed.data;
+  if (message.type === "played") {
+    const pending = speeches.get(message.speechId);
+    if (!pending || pending.deviceId !== connection.deviceId) return;
+    clearTimeout(pending.timer);
+    speeches.delete(message.speechId);
+    const { type: _type, ...played } = message;
+    pending.resolve(played);
+    return;
+  }
+  if (message.type === "hello") {
+    const { type: _type, ...hello } = message;
+    await touchDevice(connection.deviceId, { hello });
+  } else {
+    const { type: _type, ...telemetry } = message;
+    await touchDevice(connection.deviceId, { telemetry });
+  }
 }
 
 async function onBinary(connection: Connection, data: Buffer): Promise<void> {
@@ -241,13 +364,33 @@ async function onBinary(connection: Connection, data: Buffer): Promise<void> {
   if (!connection.frames.take()) throw new ProtocolError("Too many frames; slow down");
 
   const { width, height } = await inspectJpeg(payload);
+
+  // The answer to a capture request this server is waiting on.
+  const pending =
+    frame.trigger === "request" && frame.requestId ? captures.get(frame.requestId) : undefined;
+  if (pending && pending.deviceId !== connection.deviceId) throw new ProtocolError("Unknown request id");
+  if (pending) {
+    clearTimeout(pending.timer);
+    captures.delete(frame.requestId!);
+    // Crops answer one question; they aren't part of the timeline.
+    if (pending.crop) {
+      pending.resolve({ kind: "crop", image: Buffer.from(payload), width, height });
+      return;
+    }
+  }
   const receivedAt = new Date();
   const capturedAt =
     Math.abs(frame.capturedAt - receivedAt.getTime()) <= MAX_CLOCK_SKEW_MS
       ? new Date(frame.capturedAt)
       : receivedAt;
 
-  const name = await writeFrame(connection.deviceId, payload);
+  let name: string;
+  try {
+    name = await writeFrame(connection.deviceId, payload);
+  } catch (error) {
+    pending?.reject(new Error("The frame couldn't be stored"));
+    throw error;
+  }
   let observation;
   try {
     observation = await insertObservation({
@@ -263,11 +406,14 @@ async function onBinary(connection: Connection, data: Buffer): Promise<void> {
       bytes: payload.length,
     });
   } catch (error) {
+    pending?.reject(new Error("The frame couldn't be stored"));
     await removeFrame(connection.deviceId, name);
     throw error;
   }
   publishLive(connection.deviceId, { type: "observation", observation: publicObservation(observation) });
-  perceptionWorker.enqueue(connection.deviceId, observation.id);
+  // Requested frames are captioned ahead of change frames (someone is waiting).
+  perceptionWorker.enqueue(connection.deviceId, observation.id, { priority: frame.trigger === "request" });
+  pending?.resolve({ kind: "overview", observation });
   await touchDevice(connection.deviceId);
 }
 

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import * as esbuild from "esbuild";
 import { apiRoutesPlugin } from "../../plugins/api-routes.ts";
-import { TEST_APP_ORIGIN, TEST_AUTH_SECRET, testFilesDir } from "../config";
+import { TEST_APP_ORIGIN, TEST_AUTH_SECRET, fakePiperPort, testFilesDir } from "../config";
 
 // Builds the real server (same esbuild pipeline as dev/prod, including the
 // virtual api-routes module) and runs it as a child process against the test
@@ -56,6 +56,8 @@ export async function startTestServer(options: {
     // Conversation files go under dist/ (wiped here for a clean slate); tests
     // reach the same folder via testFilesDir(port).
     FILES_DIR: testFilesDir(options.port),
+    // Device speech goes to a stand-in Piper the tests run (test/helpers/fake-piper.ts).
+    PIPER_URL: `http://127.0.0.1:${fakePiperPort(options.port)}`,
   };
   rmSync(testFilesDir(options.port), { recursive: true, force: true });
   // Vitest exports these into its own environment; they must not leak in.

@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { MEMORY_CATEGORIES } from "../global/schema";
+import { MEMORY_CATEGORIES, type MemorySource } from "../global/schema";
 import type { AgentMember } from "../db/agents";
 import {
   createMemory,
@@ -54,7 +54,8 @@ function subjectToUserId(scope: MemoryScope, subject: string): string | null {
 // Tools are built per request because their scope (agent, speaker) and the
 // subject enum (member names) change per agent. The schemas stay stable for a
 // given agent + membership, so the prompt prefix remains KV-cache friendly.
-export function buildMemoryTools(scope: MemoryScope) {
+// `source` tags what `remember` stores: device runs write "device" (plan 4.2).
+export function buildMemoryTools(scope: MemoryScope, options: { source?: MemorySource } = {}) {
   return {
     remember: tool({
       description:
@@ -109,6 +110,7 @@ export function buildMemoryTools(scope: MemoryScope) {
             poolId: scope.poolId,
             subjectUserId: subjectToUserId(scope, subject),
             createdBy: scope.speaker.id,
+            source: options.source,
           },
           embedding
         );
@@ -206,13 +208,20 @@ export async function buildMemorySystemPrompt(
   {
     sharedConversation,
     customPrompt,
-  }: { sharedConversation: boolean; customPrompt?: string | null }
+    deviceName,
+  }: {
+    sharedConversation: boolean;
+    customPrompt?: string | null;
+    // A device's agent run: its messages come from the device, not a person.
+    deviceName?: string;
+  }
 ): Promise<string> {
   const pinned = await getPinnedMemories(scope.poolId);
 
   const memberNames = scope.members.map((m) => m.name).join(", ");
-  const membersLine =
-    scope.members.length === 1
+  const membersLine = deviceName
+    ? `You assist ${scope.members.length === 1 ? "one person" : "several people"}: ${memberNames}. The messages in this conversation don't come from them: they are reports from ${deviceName}, a device with a camera and a speaker that works for them. Nobody in the camera's view is identified: never assume a person you see is one of them, and never call anyone in view by name.`
+    : scope.members.length === 1
       ? `You assist one person: ${memberNames}.`
       : sharedConversation
         ? `This assistant is shared by several people: ${memberNames}. This is a shared conversation: any member can write in it, and each user message is prefixed with the speaker's name. Keep their facts straight and never mix one person's details into another's.`

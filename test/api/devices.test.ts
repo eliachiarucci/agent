@@ -118,7 +118,9 @@ describe("/agent/devices", () => {
     const { device, token } = await register(client);
 
     expect(token).toMatch(/^dev_/);
-    expect(device).toMatchObject({ name: "Rover", agentId, role: "owner", online: false });
+    // The device gets its own agent (test/api/device-agent.test.ts).
+    expect(device).toMatchObject({ name: "Rover", role: "owner", online: false });
+    expect(device.agentId).not.toBe(agentId);
     expect(device.settings.cadence).toMatchObject({ fov: 125, size: "2576x1449" });
     expect(device).not.toHaveProperty("tokenHash");
 
@@ -343,7 +345,7 @@ describe("device access", () => {
     expect((await bob.client.delete(`/agent/devices?id=${device.id}`)).status).toBe(404);
 
     // Bob joins the agent the device works for: he can watch, not manage.
-    await db.insert(agentMembers).values({ agentId: alice.agentId, userId: bob.user.id });
+    await db.insert(agentMembers).values({ agentId: device.agentId, userId: bob.user.id });
     const listed = (await bob.client.get("/agent/devices")).body;
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ id: device.id, role: "member" });

@@ -57,7 +57,21 @@ export const telemetrySchema = z.object({
 });
 export type DeviceTelemetry = Omit<z.infer<typeof telemetrySchema>, "type">;
 
-export const deviceTextMessageSchema = z.discriminatedUnion("type", [helloSchema, telemetrySchema]);
+// The device finished (or failed) playing a `speech` message.
+export const playedSchema = z.object({
+  type: z.literal("played"),
+  speechId: z.string().min(1).max(64),
+  ok: z.boolean(),
+  durationMs: z.number().int().min(0).max(10 * 60 * 1000).optional(),
+  error: z.string().max(500).optional(),
+});
+export type DevicePlayed = Omit<z.infer<typeof playedSchema>, "type">;
+
+export const deviceTextMessageSchema = z.discriminatedUnion("type", [
+  helloSchema,
+  telemetrySchema,
+  playedSchema,
+]);
 export type DeviceTextMessage = z.infer<typeof deviceTextMessageSchema>;
 
 // Header of a binary `frame` message; the payload is the JPEG.
@@ -73,9 +87,29 @@ export type FrameHeader = z.infer<typeof frameHeaderSchema>;
 
 // ── server → device ──────────────────────────────────────────────────────────
 
+// A region of the overview, in normalised coordinates (0–1, origin top left).
+export type CaptureRegion = { x: number; y: number; w: number; h: number };
+
+export type CaptureRequest = {
+  requestId: string;
+  // Without a region: a fresh overview frame at the configured size. With one:
+  // that region rendered as an undistorted view at full resolution (plan 4.4).
+  region?: CaptureRegion;
+};
+
 export type ServerTextMessage =
   | ({ type: "config" } & DeviceConfig)
+  | ({ type: "capture" } & CaptureRequest)
+  | { type: "stop_speech" }
   | { type: "error"; message: string };
+
+// Header of a binary `speech` message; the payload is the audio file.
+export type SpeechHeader = {
+  type: "speech";
+  speechId: string;
+  format: "wav" | "mp3";
+  sampleRate: number;
+};
 
 // What the device needs from its settings (lib/devices/settings.ts).
 export type DeviceConfig = {

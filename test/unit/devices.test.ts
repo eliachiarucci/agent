@@ -127,7 +127,7 @@ describe("device settings", () => {
   it("reject unknown keys and out-of-range values", () => {
     expect(deviceSettingsPatchSchema.safeParse({ cadence: { fov: 130 } }).success).toBe(false);
     expect(deviceSettingsPatchSchema.safeParse({ cadence: { zoom: 2 } }).success).toBe(false);
-    expect(deviceSettingsPatchSchema.safeParse({ speech: {} }).success).toBe(false);
+    expect(deviceSettingsPatchSchema.safeParse({ faces: {} }).success).toBe(false);
   });
 });
 

@@ -20,6 +20,10 @@ export const SERVER_PORTS = { api: 3101, ai: 3102 } as const;
 export const serverUrl = (project: keyof typeof SERVER_PORTS) =>
   `http://localhost:${SERVER_PORTS[project]}`;
 
+// Where a test server expects Piper (PIPER_URL): a stand-in the tests start
+// themselves (test/helpers/fake-piper.ts), ten ports above the server's.
+export const fakePiperPort = (serverPort: number) => serverPort + 10;
+
 // Conversation-file storage for spawned test servers (FILES_DIR). Per port so
 // api/ai runs don't collide; tests compute the same path to seed/inspect files
 // (both processes share the repo root as cwd).

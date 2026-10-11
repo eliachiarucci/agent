@@ -82,3 +82,30 @@ export async function captionFrame(params: {
     return { ok: false, error: message };
   }
 }
+
+/** A free-text answer about one image (the zoom tool's crop), on the perception model. */
+export async function askAboutImage(params: {
+  target: PerceptionTarget;
+  image: Uint8Array;
+  question: string;
+  timeoutMs?: number;
+}): Promise<string> {
+  const result = await generateText({
+    model: params.target.model,
+    system:
+      "You look closely at a crop of a camera frame for a rover's agent and answer its question in a few sentences. Describe only what is visible. Never say who a person is.",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: params.question },
+          { type: "image", image: params.image, mediaType: "image/jpeg" },
+        ],
+      },
+    ],
+    providerOptions: params.target.providerOptions,
+    maxRetries: 1,
+    abortSignal: AbortSignal.timeout(params.timeoutMs ?? 60_000),
+  });
+  return result.text.trim();
+}

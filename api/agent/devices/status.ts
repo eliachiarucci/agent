@@ -1,6 +1,13 @@
 import express from 'express';
 import { z } from "zod";
-import { countCaptionCalls, latestCaptioned, latestObservation } from "../../../lib/db/devices";
+import {
+    countCaptionCalls,
+    countDeviceEvents,
+    latestCaptioned,
+    latestObservation,
+    listDeviceEvents,
+} from "../../../lib/db/devices";
+import { resolveRunModel } from "../../../lib/agent/device-run";
 import { resolveDeviceAccess } from "../../../lib/devices/access";
 import { deviceLinkStatus } from "../../../lib/devices/gateway";
 import { publicObservation } from "../../../lib/devices/live";
@@ -17,7 +24,8 @@ export const OPTIONS: express.RequestHandler = async (req, res) => {
 const HOUR_MS = 60 * 60 * 1000;
 
 // Link state, what the device last reported, its newest observation and
-// caption, and where captioning stands (model, budget use).
+// caption, where captioning and agent runs stand (model, budget use), and
+// the last thing said.
 export const GET: express.RequestHandler = async (req, res) => {
     const parsed = z.object({ id: z.uuid() }).safeParse(req.query);
     if (!parsed.success) {
@@ -32,12 +40,28 @@ export const GET: express.RequestHandler = async (req, res) => {
     }
 
     const { device } = access;
-    const { perception } = readDeviceSettings(device.settings);
-    const [lastObservation, lastCaptioned, callsLastHour, target] = await Promise.all([
+    const { perception, agent, speech } = readDeviceSettings(device.settings);
+    const hourAgo = new Date(Date.now() - HOUR_MS);
+    const [
+        lastObservation,
+        lastCaptioned,
+        callsLastHour,
+        target,
+        runModel,
+        runsLastHour,
+        [lastRun],
+        spokenLastHour,
+        [lastSpeech],
+    ] = await Promise.all([
         latestObservation(device.id),
         latestCaptioned(device.id),
-        countCaptionCalls(device.id, new Date(Date.now() - HOUR_MS)),
+        countCaptionCalls(device.id, hourAgo),
         resolvePerceptionTarget(device.ownerId, perception),
+        resolveRunModel(device.ownerId, agent),
+        countDeviceEvents(device.id, "run", hourAgo, ["done", "failed"]),
+        listDeviceEvents({ deviceId: device.id, kind: "run", limit: 1 }),
+        countDeviceEvents(device.id, "speech", hourAgo, ["spoken"]),
+        listDeviceEvents({ deviceId: device.id, kind: "speech", limit: 1 }),
     ]);
     res.json({
         ...deviceLinkStatus(device.id),
@@ -52,6 +76,20 @@ export const GET: express.RequestHandler = async (req, res) => {
             framesPerHour: perception.framesPerHour,
             callsLastHour,
             overBudget: callsLastHour >= perception.framesPerHour,
+        },
+        agent: {
+            enabled: agent.enabled,
+            model: runModel ? { provider: runModel.provider, model: runModel.modelId } : null,
+            runsPerHour: agent.runsPerHour,
+            runsLastHour,
+            lastRun: lastRun ?? null,
+        },
+        speech: {
+            muted: speech.muted,
+            provider: speech.provider,
+            maxPerHour: speech.maxPerHour,
+            spokenLastHour,
+            lastSpeech: lastSpeech ?? null,
         },
     });
 }

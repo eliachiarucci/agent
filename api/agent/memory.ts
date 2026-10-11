@@ -1,6 +1,6 @@
 import express from 'express';
 import { z } from "zod";
-import { MEMORY_CATEGORIES } from "../../lib/global/schema";
+import { MEMORY_CATEGORIES, MEMORY_SOURCES } from "../../lib/global/schema";
 import { getSessionUser, resolveActor, type SessionUser } from "../../lib/agent/actor";
 import { canAccessMemoryPool } from "../../lib/db/memory-pools";
 import {
@@ -53,6 +53,8 @@ const querySchema = z.object({
     q: z.string().min(1).optional(),
     category: categorySchema.optional(),
     pinned: z.stringbool().optional(),
+    // "device": what devices' agent runs stored, for review.
+    source: z.enum(MEMORY_SOURCES).optional(),
     limit: z.coerce.number().int().min(1).max(200).optional(),
     agent_id: z.uuid().optional(),
     pool_id: z.uuid().optional(),
@@ -65,7 +67,7 @@ export const GET: express.RequestHandler = async (req, res) => {
         return;
     }
 
-    const { q, category, pinned, limit, agent_id, pool_id } = parsed.data;
+    const { q, category, pinned, source, limit, agent_id, pool_id } = parsed.data;
 
     const resolved = await resolvePool(req, { pool_id, agent_id });
     if (!resolved.ok) {
@@ -81,7 +83,7 @@ export const GET: express.RequestHandler = async (req, res) => {
     // Substring match rather than searchMemories: semantic search ranks every
     // memory (useless as a browse filter) and bumps lastAccessedAt, which would
     // let UI typing distort the agent's recency-weighted retrieval.
-    const memories = await findMemories(resolved.poolId, { contains: q, category, pinned, limit });
+    const memories = await findMemories(resolved.poolId, { contains: q, category, pinned, source, limit });
 
     res.json(memories.map(toJson));
 }

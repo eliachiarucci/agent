@@ -1,6 +1,6 @@
 import { and, cosineDistance, desc, eq, ilike, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../global/db";
-import { memories, type MemoryCategory } from "../global/schema";
+import { memories, type MemoryCategory, type MemorySource } from "../global/schema";
 import { embedText } from "../global/ai";
 
 export type Memory = typeof memories.$inferSelect;
@@ -14,13 +14,16 @@ export type NewMemory = {
   /** Who the fact is about; null/undefined = shared fact about the group. */
   subjectUserId?: string | null;
   createdBy?: string | null;
+  /** Defaults to "chat"; device runs write "device". */
+  source?: MemorySource;
 };
 
-export type MemoryChanges = Partial<Omit<NewMemory, "poolId" | "createdBy">>;
+export type MemoryChanges = Partial<Omit<NewMemory, "poolId" | "createdBy" | "source">>;
 
 export type FindMemoriesFilter = {
   category?: MemoryCategory;
   pinned?: boolean;
+  source?: MemorySource;
   limit?: number;
   /** Case-insensitive substring match on content (for browsing UIs; the agent uses searchMemories). */
   contains?: string;
@@ -111,6 +114,7 @@ export async function findMemories(
   const conditions = [eq(memories.poolId, poolId)];
   if (filter.category !== undefined) conditions.push(eq(memories.category, filter.category));
   if (filter.pinned !== undefined) conditions.push(eq(memories.pinned, filter.pinned));
+  if (filter.source !== undefined) conditions.push(eq(memories.source, filter.source));
   if (filter.contains !== undefined)
     conditions.push(ilike(memories.content, `%${filter.contains.replaceAll(/[%_\\]/g, "\\$&")}%`));
 
