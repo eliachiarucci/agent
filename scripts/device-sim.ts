@@ -16,6 +16,17 @@
 // the current frame, cropped (the rover renders it from the full sensor frame).
 // The token comes from DEVICE_TOKEN, so it stays out of the shell history;
 // register a device with POST /agent/devices to get one.
+//
+// Voice mode (plan 4.11), with or without a frame source:
+//   --speak a.wav,b.wav   streams each file as one stretch of speech, in real
+//                         time (any format ffmpeg reads), --speak-gap seconds
+//                         after the previous reply finished (default 2);
+//   --interrupt           sends the next file 1.5 s into the reply instead (barge-in);
+//   --mic                 the Mac's microphone (--mic-device, default 0) through
+//                         ffmpeg, with an energy VAD (300 ms pre-roll, ends after
+//                         300 ms of silence); half duplex unless --full-duplex
+//                         (use headphones), so the reply doesn't hear itself.
+// Speech chunks play back to back with afplay; stop_speech drops the queue.
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,13 +47,21 @@ const { values: args } = parseArgs({
     camera: { type: "string", default: "0" },
     size: { type: "string", default: "1280x720" },
     interval: { type: "string", default: "2" },
+    speak: { type: "string" },
+    "speak-gap": { type: "string", default: "2" },
+    interrupt: { type: "boolean", default: false },
+    mic: { type: "boolean", default: false },
+    "mic-device": { type: "string", default: "0" },
+    "full-duplex": { type: "boolean", default: false },
   },
 });
 
 const token = process.env.DEVICE_TOKEN;
 if (!token) fail("Set DEVICE_TOKEN to the token from POST /agent/devices.");
-if ([args.dir, args.files, args.webcam].filter(Boolean).length !== 1) {
-  fail("Pick one source: --dir <folder of JPEGs>, --files <a.jpg,b.jpg,…> or --webcam.");
+const frameSources = [args.dir, args.files, args.webcam].filter(Boolean).length;
+const voice = !!(args.speak || args.mic);
+if (frameSources > 1 || (frameSources === 0 && !voice)) {
+  fail("Pick one frame source (--dir, --files or --webcam), and/or --speak / --mic.");
 }
 
 const intervalMs = Number(args.interval) * 1000;
@@ -156,7 +175,7 @@ function connect(source: Source): void {
         void sendCapture(source, message.requestId, message.region);
         break;
       case "stop_speech":
-        player?.kill();
+        stopSpeech();
         break;
       case "error":
         console.error("Server error:", message.message);
@@ -219,7 +238,14 @@ function sendTelemetry(): void {
 
 // ── Speech ───────────────────────────────────────────────────────────────────
 
+// Chunks play back to back (a voice reply arrives sentence by sentence).
 let player: ChildProcess | null = null;
+const playQueue: { speechId: string; file: string; dir: string }[] = [];
+let playing = false;
+
+function playing_(): boolean {
+  return playing || playQueue.length > 0;
+}
 
 async function onBinary(data: Buffer): Promise<void> {
   const { header, payload } = decodeBinaryMessage(data) as { header: any; payload: Buffer };
@@ -230,16 +256,157 @@ async function onBinary(data: Buffer): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "device-sim-"));
   const file = join(dir, `speech.${String(header.format ?? "wav").replace(/[^a-z0-9]/gi, "")}`);
   await writeFile(file, payload);
-  console.log(`Playing speech ${header.speechId} (${payload.length} bytes)`);
+  playQueue.push({ speechId: header.speechId, file, dir });
+  if (!playing) void playNext();
+}
+
+async function playNext(): Promise<void> {
+  const next = playQueue.shift();
+  if (!next) {
+    playing = false;
+    return;
+  }
+  playing = true;
+  console.log(`Playing speech ${next.speechId}`);
   const started = Date.now();
-  const ok = await new Promise<boolean>((resolve) => {
-    player = spawn("afplay", [file], { stdio: "ignore" });
-    player.on("exit", (code) => resolve(code === 0));
-    player.on("error", () => resolve(false));
+  const code = await new Promise<number | null>((resolve) => {
+    player = spawn("afplay", [next.file], { stdio: "ignore" });
+    player.on("exit", (c) => resolve(c));
+    player.on("error", () => resolve(1));
   });
   player = null;
-  await rm(dir, { recursive: true, force: true });
-  ws?.send(JSON.stringify({ type: "played", speechId: header.speechId, ok, durationMs: Date.now() - started }));
+  await rm(next.dir, { recursive: true, force: true });
+  const ok = code === 0;
+  ws?.send(JSON.stringify({ type: "played", speechId: next.speechId, ok, durationMs: Date.now() - started, ...(!ok && { error: "Stopped" }) }));
+  void playNext();
+}
+
+function stopSpeech(): void {
+  // Queued chunks are acknowledged as not played; the current one is cut.
+  for (const item of playQueue.splice(0)) {
+    ws?.send(JSON.stringify({ type: "played", speechId: item.speechId, ok: false, durationMs: 0, error: "Stopped" }));
+    void rm(item.dir, { recursive: true, force: true });
+  }
+  player?.kill();
+}
+
+// ── Voice uplink ─────────────────────────────────────────────────────────────
+
+const CHUNK_MS = 40;
+const BYTES_PER_MS = 32; // 16 kHz s16le mono
+let segment = 0;
+let audioSeq = 0;
+
+function sendAudio(seg: string, pcm: Buffer, flags: { start?: boolean; end?: boolean } = {}): void {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const header = { type: "audio", segment: seg, seq: audioSeq++, format: "pcm_s16le", sampleRate: 16000, ...flags };
+  ws.send(encodeBinaryMessage(header, pcm));
+}
+
+/** Any audio file → 16 kHz mono s16le PCM. */
+async function decodeAudio(path: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const ff = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"]);
+    ff.stdout.on("data", (c: Buffer) => chunks.push(c));
+    ff.on("exit", (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`ffmpeg failed on ${path}`))));
+  });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Streams a clip as one stretch of speech, paced in real time. */
+async function speakClip(pcm: Buffer, label: string): Promise<void> {
+  const seg = `s${++segment}`;
+  const bytes = CHUNK_MS * BYTES_PER_MS;
+  console.log(`Speaking ${label} (${(pcm.length / BYTES_PER_MS / 1000).toFixed(1)} s)`);
+  const t0 = Date.now();
+  for (let off = 0, i = 0; off < pcm.length; off += bytes, i++) {
+    sendAudio(seg, pcm.subarray(off, off + bytes), off === 0 ? { start: true } : {});
+    const wait = t0 + (i + 1) * CHUNK_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+  }
+  sendAudio(seg, Buffer.alloc(0), { end: true });
+  console.log(`Speech ended ${new Date().toISOString().slice(11, 23)}`);
+}
+
+async function runSpeakScript(files: string[]): Promise<void> {
+  while (ws?.readyState !== WebSocket.OPEN || !config) await sleep(100);
+  for (const [i, file] of files.entries()) {
+    const pcm = await decodeAudio(file);
+    await speakClip(pcm, file);
+    if (i === files.length - 1) break;
+    // Wait for the reply to start (or a few seconds of silence), then either
+    // interrupt it or let it finish.
+    const until = Date.now() + 8000;
+    while (!playing_() && Date.now() < until) await sleep(50);
+    if (args.interrupt && playing_()) {
+      await sleep(1500);
+      console.log("Interrupting");
+      continue;
+    }
+    while (playing_()) await sleep(50);
+    await sleep(Number(args["speak-gap"]) * 1000);
+  }
+  // Let the last reply play out before exiting.
+  const until = Date.now() + 12000;
+  while (!playing_() && Date.now() < until) await sleep(50);
+  while (playing_()) await sleep(50);
+  await sleep(1000);
+  process.exit(0);
+}
+
+/** The Mac's microphone with an energy VAD. */
+function startMic(): void {
+  const ff = spawn(
+    "ffmpeg",
+    ["-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", `:${args["mic-device"]}`, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+    { stdio: ["ignore", "pipe", "inherit"] }
+  );
+  ff.on("exit", (code) => fail(`ffmpeg (mic) exited with code ${code} (microphone permission for this terminal?)`));
+  process.on("exit", () => ff.kill());
+  const frame = 30 * BYTES_PER_MS; // 30 ms
+  let pending = Buffer.alloc(0);
+  const preroll: Buffer[] = [];
+  let noise = 300; // RMS noise floor, adapts while silent
+  let inSpeech = false;
+  let silentMs = 0;
+  let seg = "";
+  ff.stdout.on("data", (chunk: Buffer) => {
+    pending = Buffer.concat([pending, chunk]);
+    while (pending.length >= frame) {
+      const f = pending.subarray(0, frame);
+      pending = pending.subarray(frame);
+      let sum = 0;
+      for (let i = 0; i < f.length; i += 2) {
+        const v = f.readInt16LE(i);
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / (f.length / 2));
+      const muted = !args["full-duplex"] && playing_();
+      const voiced = !muted && rms > Math.max(noise * 3, 400);
+      if (!inSpeech) {
+        if (!voiced) noise = noise * 0.95 + rms * 0.05;
+        preroll.push(Buffer.from(f));
+        if (preroll.length > 10) preroll.shift(); // 300 ms
+        if (voiced) {
+          inSpeech = true;
+          silentMs = 0;
+          seg = `m${++segment}`;
+          const head = Buffer.concat(preroll.splice(0));
+          sendAudio(seg, head, { start: true });
+        }
+        continue;
+      }
+      sendAudio(seg, Buffer.from(f));
+      silentMs = voiced ? 0 : silentMs + 30;
+      if (silentMs >= 300 || muted) {
+        sendAudio(seg, Buffer.alloc(0), { end: true });
+        inSpeech = false;
+      }
+    }
+  });
+  console.log(`Listening on microphone ${args["mic-device"]}${args["full-duplex"] ? " (full duplex)" : ""}`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -249,12 +416,16 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-const source = args.dir
+const source: Source = args.dir
   ? await folderSource(args.dir)
   : args.files
     ? listSource(args.files.split(",").filter(Boolean), "--files")
-    : webcamSource(args.camera!, args.size!);
+    : args.webcam
+      ? webcamSource(args.camera!, args.size!)
+      : { next: async () => null, current: async () => null };
 connect(source);
+if (args.speak) void runSpeakScript(args.speak.split(",").filter(Boolean));
+if (args.mic) startMic();
 
 // The frame clock: the requested interval, never faster than the server allows.
 let lastFrameAt = 0;

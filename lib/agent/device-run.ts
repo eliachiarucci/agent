@@ -29,6 +29,7 @@ import { getUser } from "../db/users";
 import { askAboutImage } from "../devices/caption";
 import { frameFilePath } from "../devices/frames";
 import { DeviceOfflineError, requestCapture } from "../devices/gateway";
+import { withDeviceLock } from "../devices/lock";
 import { publishLive } from "../devices/live";
 import { buildObservationTools } from "../devices/observation-tools";
 import { perceptionProviderOptions, resolvePerceptionTarget } from "../devices/perception-model";
@@ -58,12 +59,17 @@ import { loadSystemPrompt } from "./system-prompt";
 // the captions (or a person's "look", or the reflection timer) wakes the
 // device's agent, which reads the captions since its last run and the newest
 // frame, and may speak, look closer, search the timeline and store lasting
-// facts. Each run appends one exchange to the device's daily log: one
-// conversation per device per local day, owned by the device's owner, under
-// the device's agent, shared with the agent's members.
+// facts. Each run appends one exchange to the device's conversation: one
+// continuous conversation per device (plan D24), compacted as it grows, owned
+// by the device's owner, under the device's agent, shared with its members.
+// Voice turns (voice-turn.ts) write the same conversation with the same system
+// prompt and tools, so the prompt cache carries across both.
 
 export const DEVICE_CONTEXT_OPEN = "<device-context>";
 const DEVICE_CONTEXT_CLOSE = "</device-context>";
+export const HEARD_OPEN = "<heard>";
+export const HEARD_CLOSE = "</heard>";
+export const SILENT = "<silent/>";
 
 const HOUR_MS = 60 * 60 * 1000;
 // Frames kept as images in the model's view; older ones become their caption.
@@ -105,7 +111,7 @@ export const DEVICE_MEMORY_EXTRACTION_PROMPT = [
 function deviceRules(deviceName: string): string {
   return [
     "## Device runs",
-    `You are the agent of ${deviceName}, a device with a camera and a speaker. The messages in this conversation are reports from it, not from a person: a ${DEVICE_CONTEXT_OPEN} block (the time, what woke you, the captions since your last run, what was said recently) and its newest frame. Nobody reads your replies as they happen; together they are the day's log.`,
+    `You are the agent of ${deviceName}, a device with a camera, a microphone and a speaker. The messages in this conversation come from it, not from a person typing: ${DEVICE_CONTEXT_OPEN} reports (the time, what woke you, the captions since your last run, what was said recently, and its newest frame) and ${HEARD_OPEN} blocks (what its microphone heard; see "Voice"). Nobody reads your replies to reports as they happen; together they are the device's log.`,
     "- End with one or two short sentences for the log: what happened, and what you did about it.",
     "- Speak (the speak tool) only when it helps someone who is there. When a person newly appears and nothing was said in the last 10 minutes, greet them in one short sentence. Also warn about something unsafe, and answer someone who talks to the device. Keep it to a sentence or two, and don't repeat what was said recently. When nobody is there, don't speak.",
     "- If speak refuses (quiet hours, muted, cooldown), accept it; don't retry with other wording.",
@@ -114,6 +120,13 @@ function deviceRules(deviceName: string): string {
     "- Store lasting facts only (the place, routines, animals, the known people you serve), never anything about strangers.",
     "- Use zoom when a detail matters and the frame is too small to tell; use searchObservations to compare with earlier today or other days.",
     '- A run woken by "reflection" sums up the period for the log and stores lasting facts; it doesn\'t speak.',
+    "",
+    "## Voice",
+    `A ${HEARD_OPEN} block is what the microphone heard: the time, then one line per stretch of speech, "voice N: words" (N tells voices apart within a conversation; it is not a name) with the language when known. Your reply to it is spoken aloud by ${deviceName}, as it is.`,
+    `- Reply exactly ${SILENT} (nothing else) unless someone is talking to you: they say your name ("${deviceName}"), ask you something clearly meant for you, or continue a conversation they are having with you. People talking to each other, a TV or radio, and speech you can't follow get ${SILENT}.`,
+    "- When you answer: one or two short sentences of plain spoken language (no lists, markdown, emoji or URLs), in the language you were addressed in. Never use the speak tool to answer: your reply is already spoken.",
+    "- The transcript can have errors; if a request is unclear, ask a short question back.",
+    "- Voices are not identified: don't guess who is speaking, and don't call anyone by a name they haven't told you in this conversation.",
   ].join("\n");
 }
 
@@ -169,7 +182,7 @@ export type DeviceRunDeps = {
   ask: (device: Device, settings: DeviceSettings, image: Uint8Array, question: string) => Promise<string>;
 };
 
-const defaultDeps: DeviceRunDeps = {
+export const defaultDeviceRunDeps: DeviceRunDeps = {
   now: () => new Date(),
   resolveModel: (device, settings) => resolveRunModel(device.ownerId, settings.agent),
   speak,
@@ -251,14 +264,106 @@ export function deviceContextBlock(params: {
   ].join("\n");
 }
 
+/** The device's one conversation (plan D24) under its current agent, and its history. */
+export async function loadDeviceConversation(deviceId: string, agentId: string) {
+  const latest = await latestDeviceConversation(deviceId);
+  const current = latest && latest.agentId === agentId ? latest : undefined;
+  return { current, history: current ? toUIMessages(current.messages ?? []) : [] };
+}
+
+/** The system prompt of every model call on the device's conversation: runs and voice turns alike. */
+export function deviceSystemPrompt(params: {
+  basePrompt: string;
+  agentPrompt: string | null | undefined;
+  memorySystemPrompt: string;
+  deviceName: string;
+}): string {
+  const agentPrompt = params.agentPrompt?.trim()
+    ? `Instructions from this agent's owner:\n${params.agentPrompt.trim()}`
+    : "";
+  return [params.basePrompt, agentPrompt, params.memorySystemPrompt, deviceRules(params.deviceName), dateToolPrompt, notesPrompt]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** The tools of every model call on the device's conversation (the same set keeps the prompt cache warm). */
+export function buildDeviceTools(params: {
+  device: Device;
+  settings: DeviceSettings;
+  deps: Pick<DeviceRunDeps, "speak" | "capture" | "ask" | "now">;
+  memoryScope: MemoryScope | null;
+  conversationId: string;
+  timeZone: string;
+  agentId: string;
+  ownerId: string;
+}) {
+  const { device, settings, deps, memoryScope, timeZone } = params;
+  const deviceId = device.id;
+  const runConversationId = params.conversationId;
+  return {
+    ...(memoryScope ? buildMemoryTools(memoryScope, { source: "device" }) : {}),
+    speak: tool({
+      description: `Say something out loud through ${device.name}'s speaker. Brief and only when useful to someone who is there. Limits (quiet hours, cooldown, hourly cap, mute) are enforced; a refusal says why.`,
+      inputSchema: z.object({
+        text: z.string().min(1).max(MAX_SPEECH_CHARS).describe("What to say: a sentence or two"),
+        language: z
+          .string()
+          .min(2)
+          .max(35)
+          .optional()
+          .describe(`BCP-47 language tag, e.g. "en" or "it". Defaults to "${settings.speech.language}".`),
+        urgent: z
+          .boolean()
+          .optional()
+          .describe("Skip the cooldown, only for something unsafe that can't wait"),
+      }),
+      execute: async ({ text, language, urgent }) =>
+        deps.speak({ device, text, language, urgent, source: "agent", conversationId: runConversationId }),
+    }),
+    zoom: tool({
+      description:
+        "Look closer: the device renders a region of the newest frame at full resolution, and a vision model answers your question about it. Coordinates are fractions of the frame (0–1, origin top left).",
+      inputSchema: z.object({
+        region: regionSchema,
+        question: z.string().min(1).max(500).describe("What to find out about the region"),
+      }),
+      execute: async ({ region, question }) => {
+        try {
+          const result = await deps.capture(deviceId, { region });
+          if (result.kind !== "crop") return { error: "The device sent a full frame instead of the region" };
+          const name = `zoom-${localTime(deps.now(), timeZone, true).replaceAll(":", "")}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+          await writeConversationFileBytes(runConversationId, name, result.image, MAX_UPLOAD_BYTES, "upload");
+          const answer = await deps.ask(device, settings, result.image, question);
+          return { answer, file: name, width: result.width, height: result.height };
+        } catch (error) {
+          if (error instanceof DeviceOfflineError) return { error: "The device is offline" };
+          return { error: error instanceof Error ? error.message : String(error) };
+        }
+      },
+    }),
+    ...buildObservationTools({ devices: [device], timeZone }),
+    ...buildDateTools(timeZone),
+    ...buildNoteTools(params.agentId, params.ownerId),
+  };
+}
+
 /**
  * Runs the device's agent once for the merged triggers. Never throws: every
  * outcome is recorded as a "run" device event (and published live).
  */
-export async function executeDeviceRun(
+export function executeDeviceRun(
   deviceId: string,
   triggers: RunTrigger[],
-  deps: DeviceRunDeps = defaultDeps
+  deps: DeviceRunDeps = defaultDeviceRunDeps
+): Promise<DeviceRunStatus | null> {
+  // One model call at a time on the device's conversation; voice turns go first.
+  return withDeviceLock(deviceId, () => runLocked(deviceId, triggers, deps));
+}
+
+async function runLocked(
+  deviceId: string,
+  triggers: RunTrigger[],
+  deps: DeviceRunDeps
 ): Promise<DeviceRunStatus | null> {
   const device = await getDevice(deviceId);
   if (!device) return null;
@@ -302,13 +407,10 @@ export async function executeDeviceRun(
     const now = deps.now();
     const day = localDate(now, timeZone);
 
-    // The daily log: today's conversation if there is one under this agent.
-    const latest = await latestDeviceConversation(deviceId);
-    const latestHistory = latest ? toUIMessages(latest.messages ?? []) : [];
-    const previousRun = lastRunMetadata(latestHistory);
-    const today = latest && latest.agentId === agent.id && previousRun?.day === day ? latest : undefined;
-    conversationId = today?.id ?? crypto.randomUUID();
-    const history = today ? latestHistory : [];
+    // The device's one conversation (plan D24), if there is one under this agent.
+    const { current, history } = await loadDeviceConversation(deviceId, agent.id);
+    const previousRun = lastRunMetadata(history);
+    conversationId = current?.id ?? crypto.randomUUID();
 
     const fallbackSince = new Date(now.getTime() - Math.max(settings.agent.reflectionMin, 30) * 60_000);
     const since = previousRun
@@ -410,7 +512,7 @@ export async function executeDeviceRun(
     history.push(userMessage);
 
     // Persisted before the model call, like a chat turn.
-    if (today) {
+    if (current) {
       await updateMessage(conversationId, { messages: history });
     } else {
       await createMessage({
@@ -424,69 +526,20 @@ export async function executeDeviceRun(
       });
     }
 
-    const agentPrompt = agent.systemPrompt?.trim()
-      ? `Instructions from this agent's owner:\n${agent.systemPrompt.trim()}`
-      : "";
-    const system = [
-      basePrompt,
-      agentPrompt,
-      memorySystemPrompt,
-      deviceRules(device.name),
-      dateToolPrompt,
-      notesPrompt,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-
-    const runConversationId = conversationId;
-    const tools = {
-      ...(memoryScope ? buildMemoryTools(memoryScope, { source: "device" }) : {}),
-      speak: tool({
-        description: `Say something out loud through ${device.name}'s speaker. Brief and only when useful to someone who is there. Limits (quiet hours, cooldown, hourly cap, mute) are enforced; a refusal says why.`,
-        inputSchema: z.object({
-          text: z.string().min(1).max(MAX_SPEECH_CHARS).describe("What to say: a sentence or two"),
-          language: z
-            .string()
-            .min(2)
-            .max(35)
-            .optional()
-            .describe(`BCP-47 language tag, e.g. "en" or "it". Defaults to "${settings.speech.language}".`),
-          urgent: z
-            .boolean()
-            .optional()
-            .describe("Skip the cooldown, only for something unsafe that can't wait"),
-        }),
-        execute: async ({ text, language, urgent }) =>
-          deps.speak({ device, text, language, urgent, source: "agent", conversationId: runConversationId }),
-      }),
-      zoom: tool({
-        description:
-          "Look closer: the device renders a region of the newest frame at full resolution, and a vision model answers your question about it. Coordinates are fractions of the frame (0–1, origin top left).",
-        inputSchema: z.object({
-          region: regionSchema,
-          question: z.string().min(1).max(500).describe("What to find out about the region"),
-        }),
-        execute: async ({ region, question }) => {
-          try {
-            const result = await deps.capture(deviceId, { region });
-            if (result.kind !== "crop") return { error: "The device sent a full frame instead of the region" };
-            const name = `zoom-${localTime(deps.now(), timeZone, true).replaceAll(":", "")}-${crypto.randomUUID().slice(0, 8)}.jpg`;
-            await writeConversationFileBytes(runConversationId, name, result.image, MAX_UPLOAD_BYTES, "upload");
-            const answer = await deps.ask(device, settings, result.image, question);
-            return { answer, file: name, width: result.width, height: result.height };
-          } catch (error) {
-            if (error instanceof DeviceOfflineError) return { error: "The device is offline" };
-            return { error: error instanceof Error ? error.message : String(error) };
-          }
-        },
-      }),
-      ...buildObservationTools({ devices: [device], timeZone }),
-      ...buildDateTools(timeZone),
-      ...buildNoteTools(agent.id, owner.id),
-    };
+    const system = deviceSystemPrompt({ basePrompt, agentPrompt: agent.systemPrompt, memorySystemPrompt, deviceName: device.name });
+    const tools = buildDeviceTools({
+      device,
+      settings,
+      deps,
+      memoryScope,
+      conversationId,
+      timeZone,
+      agentId: agent.id,
+      ownerId: owner.id,
+    });
 
     const modelView = await inlineImageFileParts(
-      windowImageParts(applyCompaction(history, today?.compaction ?? null), IMAGE_WINDOW),
+      windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),
       conversationId
     );
     const modelMessages = await convertToModelMessages(modelView, { tools, ignoreIncompleteToolCalls: true });
@@ -527,7 +580,7 @@ export async function executeDeviceRun(
         model: runModel.model as Parameters<typeof planChatCompaction>[0]["model"],
         target: runModel.target,
         messages: history,
-        prior: today?.compaction ?? null,
+        prior: current?.compaction ?? null,
         usedTokens: usageTokens(lastUsage),
       });
       if (compaction) await updateMessage(conversationId, { compaction });

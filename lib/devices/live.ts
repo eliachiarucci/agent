@@ -9,9 +9,11 @@ export type LiveEvent =
   // A frame arrived, and later its caption settled (captioned, failed, …).
   | { type: "observation"; observation: PublicObservation }
   | { type: "caption"; observation: PublicObservation }
-  // Something was said through the device (or refused), and an agent run finished.
+  // Something was said through the device (or refused), an agent run finished,
+  // and a voice turn finished (plan 4.11).
   | { type: "speech"; event: DeviceEvent }
   | { type: "run"; event: DeviceEvent }
+  | { type: "voice"; event: DeviceEvent }
   | { type: "deleted" };
 
 export type PublicObservation = Omit<DeviceObservation, "frame"> & { hasFrame: boolean };

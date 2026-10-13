@@ -720,7 +720,7 @@ export const deviceObservations = pgTable(
 
 // "speech": something the device was asked to say (and whether it played);
 // "run": an agent run, or one skipped (lib/agent/device-run.ts).
-export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error", "speech", "run"] as const;
+export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error", "speech", "run", "voice"] as const;
 export type DeviceEventKind = (typeof DEVICE_EVENT_KINDS)[number];
 
 // Device log: connections, protocol errors, speech and agent runs.

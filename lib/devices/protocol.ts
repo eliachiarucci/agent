@@ -85,6 +85,23 @@ export const frameHeaderSchema = z.object({
 });
 export type FrameHeader = z.infer<typeof frameHeaderSchema>;
 
+// Header of a binary `audio` message (voice mode, plan 4.11): microphone audio
+// while the device's VAD hears speech, 16 kHz mono 16-bit PCM in 20–100 ms
+// chunks. A segment is one stretch of speech (with ~300 ms of pre-roll); its
+// first chunk has start, its last end (the payload may be empty).
+export const AUDIO_SAMPLE_RATE = 16_000;
+export const MAX_AUDIO_CHUNK_BYTES = 64 * 1024;
+export const audioHeaderSchema = z.object({
+  type: z.literal("audio"),
+  segment: z.string().min(1).max(64),
+  seq: z.number().int().min(0).max(2 ** 31 - 1),
+  start: z.boolean().optional(),
+  end: z.boolean().optional(),
+  format: z.literal("pcm_s16le"),
+  sampleRate: z.literal(AUDIO_SAMPLE_RATE),
+});
+export type AudioHeader = z.infer<typeof audioHeaderSchema>;
+
 // ── server → device ──────────────────────────────────────────────────────────
 
 // A region of the overview, in normalised coordinates (0–1, origin top left).

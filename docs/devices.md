@@ -2,7 +2,8 @@
 
 Camera + speaker devices (the rover first; a Pi with a webcam or `scripts/device-sim.ts` work the same way) stream
 frames to the backend over one outbound WebSocket each, and a vision model captions them. Captions wake the device's
-agent, which keeps a daily log, can speak through the device and stores lasting facts. The full plan lives in the
+agent, which keeps the device's conversation, can speak through the device and stores lasting facts, and talks with people
+near it in voice mode. The full plan lives in the
 rover repo (`rover2/docs/vision-agent-plan.md`).
 
 ## Model
@@ -18,7 +19,7 @@ rover repo (`rover2/docs/vision-agent-plan.md`).
 - **`device_events`**: connected / disconnected / error, `speech` (what was said or refused, with `status`
   `spoken` / `refused` / `failed`, `source` `agent` / `user`) and `run` (each agent run, with `status`, triggers,
   tools, tokens).
-- **`conversations.device_id`**: set on a device's daily logs. **`memories.source`**: `chat` or `device`.
+- **`conversations.device_id`**: set on a device's conversation. **`memories.source`**: `chat` or `device`.
 - **Frames on disk:** `FILES_DIR/devices/<device id>/frames/<uuid>.jpg`, in the volume deployments already mount.
 - **Access:** the owner manages the device (settings, token, delete). Members of the device's agent can see it,
   its status and its observations. To anyone else it doesn't exist (404).
@@ -44,7 +45,7 @@ as a `config` message.
 | `perception.provider`, `perception.model` | `null` | The captioning model, from the owner's providers. `null` provider → the owner's default model; `null` model → the provider's default |
 | `perception.route` | `null` | OpenRouter only: `{ only: ["google-vertex/europe"], allowFallbacks: false }` pins the endpoints that may serve the call |
 | `perception.framesPerHour` | 300 | Model calls per rolling hour (captioned + failed) |
-| `timezone` | `null` | IANA zone for the daily log, quiet hours and times shown to the agent; `null` → the server's |
+| `timezone` | `null` | IANA zone for quiet hours and the times shown to the agent; `null` → the server's |
 | `agent.enabled` | `true` | Off: captions never wake the agent |
 | `agent.provider`, `agent.model`, `agent.route` | `null` | The run's model, resolved like perception's (default: the owner's default model); `route` pins OpenRouter endpoints, since the frame goes to this model too |
 | `agent.salience` | 0.6 | A caption at or above it wakes the agent |
@@ -59,6 +60,11 @@ as a `config` message.
 | `speech.cooldownSec` | 60 | Between agent utterances; `urgent` skips it |
 | `speech.maxPerHour` | 20 | Agent utterances per rolling hour |
 | `speech.quietHours` | 22:00–08:00 | Local, may cross midnight; `null` = never quiet |
+| `voice.enabled` | `true` | Off: the device's audio is ignored |
+| `voice.provider`, `voice.model`, `voice.route` | `null` | The voice turn's model; `null` provider → the agent run's model and route |
+| `voice.languageHints` | `["en", "it"]` | Languages the speech-to-text expects (others are still detected) |
+| `voice.endOfTurnMs` | 300 | Silence after the device's last speech segment before the turn is finalised |
+| `voice.closeAfterSec` | 45 | The speech-to-text connection closes after this long without speech |
 
 ## Link
 
@@ -82,10 +88,11 @@ Control messages are JSON text. Binary messages are `[u32 big-endian header leng
 | device → server | `telemetry` | `cpuTempC?`, `wifiRssiDbm?`, `uptimeS?` |
 | device → server | `frame` (binary) | header `{ type: "frame", seq, capturedAt (epoch ms), trigger, requestId? }`; JPEG payload |
 | device → server | `played` | `speechId`, `ok`, `durationMs?`, `error?`: sent when a `speech` message finished playing |
+| device → server | `audio` (binary) | header `{ type: "audio", segment, seq, start?, end?, format: "pcm_s16le", sampleRate: 16000 }`; 16 kHz mono PCM while the device's VAD hears speech (with ~300 ms of pre-roll), up to 64 KB a chunk; `start` on a segment's first chunk, `end` on its last (may be empty) |
 | server → device | `config` | sent on connect and on every settings change: `paused` and the `cadence` fields |
 | server → device | `capture` | `requestId`, `region?` (`{ x, y, w, h }`, 0–1 of the overview). Answer with a `frame`, `trigger: "request"` and the same `requestId`: the overview, or with a region that region at full resolution (not stored, not captioned) |
-| server → device | `speech` (binary) | header `{ type: "speech", speechId, format: "wav", sampleRate }`; audio payload. Answer with `played` |
-| server → device | `stop_speech` | stop playing |
+| server → device | `speech` (binary) | header `{ type: "speech", speechId, format: "wav", sampleRate }`; audio payload. Clips play back to back in arrival order (a voice reply comes sentence by sentence). Answer each with `played` |
+| server → device | `stop_speech` | stop playing and drop the queue; answer the dropped clips with `played`, `ok: false` |
 | server → device | `error` | `message`; the link stays open |
 
 Close codes: `4000` replaced by a new connection, `4001` token rotated, `4002` device deleted. A device should not
@@ -131,8 +138,10 @@ spoken in the last hour, the last utterance).
   members. Deleting the device keeps the agent.
 - **Triggers:** a caption with `wake = "agent"`, salience ≥ `agent.salience`, or a new person or animal; a `look`;
   the reflection timer. Runs start at least `minGapSec` apart, one at a time; triggers in between merge.
-- **The daily log:** one conversation per device per local day, owned by the device's owner, under the device's
-  agent, shared with its members (`conversations.device_id`). Each run appends a user message (the
+- **The device's conversation:** one continuous conversation per device (plan D24), owned by the device's owner,
+  under the device's agent, shared with its members (`conversations.device_id`), compacted as it grows. Runs and
+  voice turns take a per-device lock (`lib/devices/lock.ts`; voice turns first), and share the system prompt and
+  tools, so the prompt cache carries across both. Each run appends a user message (the
   `<relevant-memories>` block, a `<device-context>` block with the time, the triggers, the captions since the last
   run and recent speech, and the newest frame copied into the log's uploads) and the agent's reply. Frames older
   than the last two runs reach the model as their caption (`windowImageParts`), so the prefix stays cacheable.
@@ -146,6 +155,32 @@ spoken in the last hour, the last utterance).
   agent has its own extraction prompt.
 - **Chats:** any chat gets `searchObservations` over the devices its sender can see, so the Personal Assistant can
   answer "what did the rover see today?".
+
+## Voice mode
+
+`lib/devices/voice/` (session, speech to text, text helpers), `lib/agent/voice-turn.ts`. Plan 4.11; phase PV, V1.
+
+- **Listening:** the device sends `audio` while its VAD hears speech. The voice session opens a Soniox real-time
+  stream on the first speech (`stt-rt-v5`, speaker labels and language identification on, its endpoint detection off;
+  `SONIOX_API_KEY`), keeps it alive while idle, and closes it after `voice.closeAfterSec` without speech.
+- **End of turn:** `voice.endOfTurnMs` after a segment ends, the session sends `finalize`; the words up to Soniox's
+  `<fin>` are the turn, split into lines by voice ("voice 1: …", with the main language). Speech that resumes before
+  `<fin>` joins the same turn. (Smart Turn is planned to decide instead of the fixed wait.)
+- **The turn:** a `<heard>` user message (day, time, the lines) in the device's conversation, then the reply,
+  streamed with the device's system prompt and tools (no `speak`: the reply is spoken). The agent answers when
+  addressed, otherwise replies exactly `<silent/>`; the start of the reply is held until it can't be `<silent/>`.
+  Each finished sentence is synthesised (Piper) and sent as its own `speech` clip, so the first audio leaves while
+  the model still writes. Markup in a reply (a tool call written as text) is never spoken.
+- **Barge-in:** 400 ms of new speech while the device plays the reply stops the model and sends `stop_speech`; the
+  stored reply keeps the sentences that played, then "[interrupted]".
+- **Limits:** a voice reply skips the speech cooldown and hourly cap; mute and quiet hours still apply (the reply is
+  stored, not spoken).
+- **Log:** a `voice` device event per turn (published live): status (`spoken`, `silent`, `interrupted`,
+  `not_spoken`, `failed`), what was heard, the reply, per-clip acks, tokens (cached included) and latencies from the
+  end of speech (`final`, `request`, `firstToken`, `firstSentence`, `firstAudio`).
+- **Measured (2026-10-13, simulator over Soniox US, Haiku 5.5 on Vertex EU, Piper local):** first audio sent
+  1.6–1.7 s after the end of speech with a 500 ms end-of-turn wait (≈ 1.4 s at the 300 ms default); `<silent/>` on
+  side talk; Italian answered in Italian; barge-in cut the reply and dropped the queue.
 
 ## Speech
 
@@ -179,6 +214,10 @@ It sends `hello`, telemetry every 30 s and a frame every interval (never faster 
 `paused`, answers `capture` requests (a region is cropped from the current frame), plays `speech` with `afplay` and
 answers `played`, and reconnects with backoff (1 → 30 s). For speech, run Piper: `docker compose up piper` and
 `PIPER_URL=http://localhost:5050`.
+
+Voice: `--speak a.wav,b.wav` streams each file as one stretch of speech in real time (`--interrupt` barges into the
+reply), `--mic` uses the Mac's microphone with an energy VAD (half duplex unless `--full-duplex`, with headphones).
+Without a frame source the simulator only talks and listens.
 
 ## Behind the UI's nginx
 

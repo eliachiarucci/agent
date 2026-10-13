@@ -12,6 +12,8 @@ import {
   MAX_HEADER_BYTES,
   MAX_TEXT_MESSAGE_BYTES,
   ProtocolError,
+  audioHeaderSchema,
+  MAX_AUDIO_CHUNK_BYTES,
   decodeBinaryMessage,
   deviceTextMessageSchema,
   encodeBinaryMessage,
@@ -27,6 +29,7 @@ import { perceptionWorker } from "./perception";
 import { TokenBucket } from "./rate-limit";
 import { deviceConfig, readDeviceSettings, type DeviceSettings } from "./settings";
 import { bearerToken, hashDeviceToken } from "./tokens";
+import { voiceSessions } from "./voice/session";
 
 // The device link (plan 4.2): each device keeps one outbound WebSocket to
 // /agent/devices/ws, authenticated once with `Authorization: Bearer <token>`.
@@ -190,6 +193,7 @@ function close(connection: Connection, code: number, reason: string): void {
   if (connections.get(connection.deviceId) === connection) {
     connections.delete(connection.deviceId);
     failPending(connection.deviceId);
+    voiceSessions.drop(connection.deviceId);
     publishLive(connection.deviceId, { type: "status", online: false });
   }
   connection.ws.close(code, reason);
@@ -311,6 +315,7 @@ function onConnection(
     if (connections.get(deviceId) === connection) {
       connections.delete(deviceId);
       failPending(deviceId);
+      voiceSessions.drop(deviceId);
       publishLive(deviceId, { type: "status", online: false });
     }
     // A deleted device has no row left to log against.
@@ -354,6 +359,14 @@ async function onText(connection: Connection, data: Buffer): Promise<void> {
 
 async function onBinary(connection: Connection, data: Buffer): Promise<void> {
   const { header, payload } = decodeBinaryMessage(data);
+  // Microphone audio for voice mode (plan 4.11).
+  if ((header as { type?: unknown })?.type === "audio") {
+    const audio = audioHeaderSchema.safeParse(header);
+    if (!audio.success) throw new ProtocolError("Malformed audio message");
+    if (payload.length > MAX_AUDIO_CHUNK_BYTES || payload.length % 2) throw new ProtocolError("Bad audio chunk");
+    voiceSessions.onAudio(connection.deviceId, () => connection.settings.voice, audio.data, Buffer.from(payload));
+    return;
+  }
   const parsed = frameHeaderSchema.safeParse(header);
   if (!parsed.success) throw new ProtocolError("Unknown or malformed binary message");
   const frame = parsed.data;

@@ -93,6 +93,24 @@ const speechSchema = z.object({
   quietHours: z.object({ start: clockTime, end: clockTime }).nullable(),
 });
 
+// Voice mode (plan 4.11): the device streams audio while someone speaks; the
+// server transcribes it (Soniox), decides when the turn ends, and the agent
+// answers out loud or stays silent.
+const voiceSchema = z.object({
+  enabled: z.boolean(),
+  // The voice turn's model, like the agent's: NULL provider → the agent run's
+  // model (and route). Reasoning is off and the prompt cached either way.
+  provider: z.enum(PROVIDER_TYPES).nullable(),
+  model: z.string().min(1).max(200).nullable(),
+  route: routeSchema,
+  // Languages Soniox should expect (it still detects others).
+  languageHints: z.array(z.string().min(2).max(10)).max(10),
+  // Silence after the device's last speech before the turn is finalised.
+  endOfTurnMs: z.number().int().min(200).max(5000),
+  // The Soniox connection closes after this long without speech (billing is by connection time).
+  closeAfterSec: z.number().int().min(10).max(600),
+});
+
 export function isTimeZone(value: string): boolean {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: value });
@@ -112,6 +130,7 @@ export const deviceSettingsSchema = z.object({
   perception: perceptionSchema,
   agent: agentSchema,
   speech: speechSchema,
+  voice: voiceSchema,
 });
 export type DeviceSettings = z.infer<typeof deviceSettingsSchema>;
 
@@ -150,6 +169,16 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
     maxPerHour: 20,
     quietHours: { start: "22:00", end: "08:00" },
   },
+  voice: {
+    enabled: true,
+    provider: null,
+    model: null,
+    route: null,
+    languageHints: ["en", "it"],
+    // Until Smart Turn decides (plan 4.11): 300 ms after the device's VAD ends a segment.
+    endOfTurnMs: 300,
+    closeAfterSec: 45,
+  },
 };
 
 // What PATCH /agent/devices accepts: any subset, section by section.
@@ -161,6 +190,7 @@ export const deviceSettingsPatchSchema = z.strictObject({
   perception: perceptionSchema.partial().strict().optional(),
   agent: agentSchema.partial().strict().optional(),
   speech: speechSchema.partial().strict().optional(),
+  voice: voiceSchema.partial().strict().optional(),
 });
 export type DeviceSettingsPatch = z.infer<typeof deviceSettingsPatchSchema>;
 
@@ -173,6 +203,7 @@ export function mergeDeviceSettings(base: DeviceSettings, patch: DeviceSettingsP
     perception: { ...base.perception, ...patch.perception },
     agent: { ...base.agent, ...patch.agent },
     speech: { ...base.speech, ...patch.speech },
+    voice: { ...base.voice, ...patch.voice },
   };
 }
 
@@ -187,6 +218,7 @@ export function readDeviceSettings(stored: unknown): DeviceSettings {
     perception: { ...DEFAULT_DEVICE_SETTINGS.perception, ...value.perception },
     agent: { ...DEFAULT_DEVICE_SETTINGS.agent, ...value.agent },
     speech: { ...DEFAULT_DEVICE_SETTINGS.speech, ...value.speech },
+    voice: { ...DEFAULT_DEVICE_SETTINGS.voice, ...value.voice },
   };
   const parsed = deviceSettingsSchema.safeParse(merged);
   return parsed.success ? parsed.data : DEFAULT_DEVICE_SETTINGS;
