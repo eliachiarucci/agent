@@ -637,6 +637,9 @@ export const devices = pgTable(
     // streaming, but only its owner sees it.
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     name: text("name").notNull(),
+    // What the device is and what it's for, written by its owner. Agents read it
+    // (chat prompts list devices with it; the device's own runs start from it).
+    description: text("description"),
     tokenHash: text("token_hash").notNull(),
     tokenCreatedAt: timestamp("token_created_at").notNull().defaultNow(),
     settings: jsonb("settings").notNull().$type<DeviceSettings>(),

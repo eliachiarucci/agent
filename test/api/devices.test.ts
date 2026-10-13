@@ -147,6 +147,24 @@ describe("/agent/devices", () => {
     expect((await client.patch("/agent/devices", { id: device.id, settings: { cadence: { fov: 170 } } })).status).toBe(400);
     expect((await client.patch("/agent/devices", { id: device.id, settings: { bogus: 1 } })).status).toBe(400);
   });
+
+  it("stores the owner's description, changes and clears it", async () => {
+    const { client } = await userWithAgent("Alice");
+    const res = await client.post("/agent/devices", { name: "Dino", description: "  A rover in the garden.  " });
+    expect(res.status).toBe(201);
+    const id = res.body.device.id;
+    expect(res.body.device.description).toBe("A rover in the garden.");
+    expect((await register(client, "Cam")).device.description).toBeNull();
+
+    const changed = await client.patch("/agent/devices", { id, description: "A rover. It watches the vegetable patch." });
+    expect(changed.body.description).toBe("A rover. It watches the vegetable patch.");
+    // Leaving it out keeps it; null or "" clears it.
+    expect((await client.patch("/agent/devices", { id, name: "Dino 2" })).body.description).toBe(changed.body.description);
+    expect((await client.patch("/agent/devices", { id, description: null })).body.description).toBeNull();
+    await client.patch("/agent/devices", { id, description: "x" });
+    expect((await client.patch("/agent/devices", { id, description: "" })).body.description).toBeNull();
+    expect((await client.patch("/agent/devices", { id, description: "x".repeat(1001) })).status).toBe(400);
+  });
 });
 
 describe("device link", () => {

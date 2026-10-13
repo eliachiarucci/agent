@@ -51,7 +51,7 @@ export async function listDevicesForUser(userId: string): Promise<Device[]> {
 export async function updateDevice(
   id: string,
   changes: Partial<
-    Pick<Device, "name" | "agentId" | "settings" | "tokenHash" | "tokenCreatedAt" | "hello" | "telemetry" | "lastSeenAt">
+    Pick<Device, "name" | "description" | "agentId" | "settings" | "tokenHash" | "tokenCreatedAt" | "hello" | "telemetry" | "lastSeenAt">
   >
 ): Promise<Device | undefined> {
   const [row] = await db
