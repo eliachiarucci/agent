@@ -31,7 +31,7 @@ import { frameFilePath } from "../devices/frames";
 import { DeviceOfflineError, requestCapture } from "../devices/gateway";
 import { publishLive } from "../devices/live";
 import { buildObservationTools } from "../devices/observation-tools";
-import { resolvePerceptionTarget } from "../devices/perception-model";
+import { perceptionProviderOptions, resolvePerceptionTarget } from "../devices/perception-model";
 import type { RunTrigger } from "../devices/run-triggers";
 import { deviceTimeZone, readDeviceSettings, type DeviceSettings } from "../devices/settings";
 import { MAX_SPEECH_CHARS, speak } from "../devices/speech";
@@ -50,7 +50,7 @@ import {
 } from "./memory";
 import { runMemoryExtraction } from "./memory-extraction";
 import { buildNoteTools, notesPrompt } from "./notes";
-import { withPromptCache } from "./prompt-cache";
+import { mergeProviderOptions, promptCacheProviderOptions, withPromptCache } from "./prompt-cache";
 import { stepsToUIMessageParts } from "./step-ui-messages";
 import { loadSystemPrompt } from "./system-prompt";
 
@@ -153,9 +153,11 @@ export async function resolveRunModel(
     provider: target.provider,
     modelId: target.model,
     target,
-    providerOptions: route
-      ? { openrouter: { provider: { only: route.only, allow_fallbacks: route.allowFallbacks } } }
-      : undefined,
+    // No reasoning (as for captions), the route, and prompt caching.
+    providerOptions: mergeProviderOptions(
+      perceptionProviderOptions(target.provider, target.model, route),
+      promptCacheProviderOptions(target.provider, target.model)
+    ),
   };
 }
 

@@ -68,7 +68,7 @@ import {
 import { addToolApprovals } from "../../lib/db/tool-approvals";
 import { runMemoryExtraction } from "../../lib/agent/memory-extraction";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
-import { withPromptCache } from "../../lib/agent/prompt-cache";
+import { promptCacheProviderOptions, withPromptCache } from "../../lib/agent/prompt-cache";
 import { listDevicesForUser } from "../../lib/db/devices";
 import { buildObservationTools, observationToolsPrompt } from "../../lib/devices/observation-tools";
 import type { StoredMessage } from "../../lib/global/schema";
@@ -571,8 +571,11 @@ export const POST: express.RequestHandler = async (req, res) => {
         ignoreIncompleteToolCalls: true,
     });
 
-    // Anthropic prompt caching (lib/agent/prompt-cache.ts).
-    const prompt = withPromptCache(system, modelMessages, provider === "anthropic");
+    // Prompt caching (lib/agent/prompt-cache.ts): breakpoints for Anthropic's
+    // own API, a top-level cache_control for Anthropic models on OpenRouter. The
+    // resolved target, so a default model (no provider in the request) caches too.
+    const prompt = withPromptCache(system, modelMessages, contextTarget?.provider === "anthropic");
+    const cacheOptions = promptCacheProviderOptions(contextTarget?.provider, contextTarget?.model);
 
     const result = streamText({
         model: wrapLanguageModel({
@@ -582,6 +585,7 @@ export const POST: express.RequestHandler = async (req, res) => {
             middleware: extractReasoningMiddleware({ tagName: "think" }),
         }),
         ...prompt,
+        ...(cacheOptions ? { providerOptions: cacheOptions } : {}),
         tools,
         // Search → read → answer flows need more steps than memory-only turns.
         stopWhen: stepCountIs(8),

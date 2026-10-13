@@ -317,7 +317,12 @@ describe("perception settings", () => {
         only: ["google-vertex/europe"],
         allowFallbacks: false,
       })
-    ).toEqual({ openrouter: { provider: { only: ["google-vertex/europe"], allow_fallbacks: false } } });
+    ).toEqual({
+      openrouter: {
+        reasoning: { enabled: false },
+        provider: { only: ["google-vertex/europe"], allow_fallbacks: false },
+      },
+    });
     expect(perceptionProviderOptions("openrouter", "google/gemini-3.1-flash-lite")).toEqual({
       openrouter: { reasoning: { effort: "minimal" } },
     });

@@ -49,9 +49,9 @@ export function buildPerceptionModel(
   }).chatModel(modelId);
 }
 
-// Captions want no reasoning: it adds latency and output tokens for no gain
-// (P0: 0 reasoning tokens with these settings on every model tried). An
-// OpenRouter route pins the endpoints that may serve the call (plan D20).
+// Captions and device runs want no reasoning: it adds latency and output tokens
+// for no gain (P0: 0 reasoning tokens with these settings on every model tried).
+// An OpenRouter route pins the endpoints that may serve the call (plan D20).
 export function perceptionProviderOptions(
   provider: ProviderType,
   modelId: string,
@@ -64,10 +64,12 @@ export function perceptionProviderOptions(
   }
   if (provider === "openrouter") {
     // OpenRouter's unified switch; openai-compatible passes unknown options into
-    // the body. Claude doesn't reason unless asked; Gemini 3 maps effort to its
-    // thinking level.
+    // the body. Gemini 3 maps effort to its thinking level. Claude 5.5 thinks by
+    // default on OpenRouter (adaptive): 101–120 reasoning tokens a reply unless
+    // it's switched off (measured 2026-10-11, plan rev 14).
     const options: Record<string, unknown> = {};
     if (/gemini-3/.test(modelId)) options.reasoning = { effort: "minimal" };
+    else if (/^anthropic\//.test(modelId)) options.reasoning = { enabled: false };
     else if (/gpt-[56]|gemma|qwen/.test(modelId)) options.reasoning = { effort: "none" };
     if (route) options.provider = { only: route.only, allow_fallbacks: route.allowFallbacks };
     return Object.keys(options).length ? { openrouter: options } : undefined;
