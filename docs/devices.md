@@ -102,7 +102,7 @@ reconnect after these, and should reconnect with backoff after anything else.
 
 | Method | Route | Who | Purpose |
 |---|---|---|---|
-| GET / POST / PATCH / DELETE | `/agent/devices` | session (owner for changes) | List, register (`{ name, agent_id?, memory_pool_id?, timezone? }` → `{ device, agent, token }`), rename / move / settings, delete |
+| GET / POST / PATCH / DELETE | `/agent/devices` | session (owner for changes) | List, register (`{ name, description?, agent_id?, memory_pool_id?, timezone? }` → `{ device, agent, token }`), rename / describe / move / settings, delete. `description` (≤ 1000 characters; `null` or `""` clears it) is what the device is and what it's for, for agents to read |
 | POST | `/agent/devices/token` | owner | Rotate the token (`{ id }` → `{ token }`) |
 | GET | `/agent/devices/status?id=` | viewer | Online, last seen, hello, telemetry, newest observation and caption, `perception` (model, budget, calls in the last hour) |
 | GET | `/agent/devices/observations?device_id=&from=&to=&before=&min_salience=&q=&limit=` | viewer | Timeline, newest first, up to 200 per page. With `q`: semantic search, best match first, each with `relevance` |
@@ -154,7 +154,11 @@ spoken in the last hour, the last utterance).
   and `DEVICE_MEMORY_EXTRACTION_PROMPT` (the place, routines, animals, known people; never strangers), unless the
   agent has its own extraction prompt.
 - **Chats:** any chat gets `searchObservations` over the devices its sender can see, so the Personal Assistant can
-  answer "what did the rover see today?".
+  answer "what did the rover see today?". The prompt's "Devices" section lists each of them with its description
+  and says to search only for questions about what a device saw or what happened where it is (without it, a chat
+  about batteries searched the rover's captions).
+- **Description:** the owner's text about what the device is and what it's for. Chats list it (above), and the
+  device's own runs get it under "Device runs".
 
 ## Voice mode
 

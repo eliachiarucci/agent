@@ -155,6 +155,13 @@
       "when": 1791727436086,
       "tag": "0021_brief_ultimo",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791926432929,
+      "tag": "0022_far_warlock",
+      "breakpoints": true
     }
   ]
 }

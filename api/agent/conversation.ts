@@ -532,7 +532,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         conversationSearchPrompt,
         connectorToolset.prompt,
         buildCronToolsPrompt(cronScope.timezone),
-        devices.length > 0 ? observationToolsPrompt : "",
+        devices.length > 0 ? observationToolsPrompt(devices) : "",
     ]
         .filter(Boolean)
         .join("\n\n");

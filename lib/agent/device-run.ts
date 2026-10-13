@@ -31,7 +31,7 @@ import { frameFilePath } from "../devices/frames";
 import { DeviceOfflineError, requestCapture } from "../devices/gateway";
 import { withDeviceLock } from "../devices/lock";
 import { publishLive } from "../devices/live";
-import { buildObservationTools } from "../devices/observation-tools";
+import { buildObservationTools, deviceDescription } from "../devices/observation-tools";
 import { perceptionProviderOptions, resolvePerceptionTarget } from "../devices/perception-model";
 import type { RunTrigger } from "../devices/run-triggers";
 import { deviceTimeZone, readDeviceSettings, type DeviceSettings } from "../devices/settings";
@@ -108,10 +108,11 @@ export const DEVICE_MEMORY_EXTRACTION_PROMPT = [
   "- You run unattended and nobody reads your replies. Don't ask questions; just operate the tools.",
 ].join("\n");
 
-function deviceRules(deviceName: string): string {
+function deviceRules(deviceName: string, description: string | null): string {
   return [
     "## Device runs",
     `You are the agent of ${deviceName}, a device with a camera, a microphone and a speaker. The messages in this conversation come from it, not from a person typing: ${DEVICE_CONTEXT_OPEN} reports (the time, what woke you, the captions since your last run, what was said recently, and its newest frame) and ${HEARD_OPEN} blocks (what its microphone heard; see "Voice"). Nobody reads your replies to reports as they happen; together they are the device's log.`,
+    ...(description ? [`What ${deviceName} is and what it's for, from its owner: ${description}`] : []),
     "- End with one or two short sentences for the log: what happened, and what you did about it.",
     "- Speak (the speak tool) only when it helps someone who is there. When a person newly appears and nothing was said in the last 10 minutes, greet them in one short sentence. Also warn about something unsafe, and answer someone who talks to the device. Keep it to a sentence or two, and don't repeat what was said recently. When nobody is there, don't speak.",
     "- If speak refuses (quiet hours, muted, cooldown), accept it; don't retry with other wording.",
@@ -277,11 +278,13 @@ export function deviceSystemPrompt(params: {
   agentPrompt: string | null | undefined;
   memorySystemPrompt: string;
   deviceName: string;
+  // The owner's description of the device (deviceDescription), if any.
+  description: string | null;
 }): string {
   const agentPrompt = params.agentPrompt?.trim()
     ? `Instructions from this agent's owner:\n${params.agentPrompt.trim()}`
     : "";
-  return [params.basePrompt, agentPrompt, params.memorySystemPrompt, deviceRules(params.deviceName), dateToolPrompt, notesPrompt]
+  return [params.basePrompt, agentPrompt, params.memorySystemPrompt, deviceRules(params.deviceName, params.description), dateToolPrompt, notesPrompt]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -526,7 +529,13 @@ async function runLocked(
       });
     }
 
-    const system = deviceSystemPrompt({ basePrompt, agentPrompt: agent.systemPrompt, memorySystemPrompt, deviceName: device.name });
+    const system = deviceSystemPrompt({
+      basePrompt,
+      agentPrompt: agent.systemPrompt,
+      memorySystemPrompt,
+      deviceName: device.name,
+      description: deviceDescription(device),
+    });
     const tools = buildDeviceTools({
       device,
       settings,

@@ -10,8 +10,10 @@ import {
   insertDeviceEvent,
   insertObservation,
   listObservations,
+  type Device,
 } from "../../lib/db/devices";
 import { InvalidFrameError, frameFilePath, inspectJpeg, writeFrame } from "../../lib/devices/frames";
+import { observationToolsPrompt } from "../../lib/devices/observation-tools";
 import {
   MAX_HEADER_BYTES,
   ProtocolError,
@@ -238,5 +240,20 @@ describe("device retention", () => {
     const { device, rows } = await deviceWithFrames([10]);
     await rm(frameFilePath(device.id, rows[0].frame!));
     expect(await runDeviceRetention()).toEqual({ frames: 1, observations: 0, events: 0 });
+  });
+});
+
+describe("the chat prompt's device section", () => {
+  const device = (name: string, description: string | null) => ({ id: `${name}-0000`, name, description }) as Device;
+
+  it("lists each device with what it is and what it's for", () => {
+    const prompt = observationToolsPrompt([
+      device("Dino", "A rover in the garden.\nIt watches the vegetable patch."),
+      device("Cam", null),
+    ]);
+    expect(prompt).toContain("- Dino: A rover in the garden. It watches the vegetable patch.");
+    expect(prompt).toContain("- Cam: (no description)");
+    expect(prompt).toContain('"what did Dino see today?"');
+    expect(prompt).toContain("Use it only when the question is about what a device saw");
   });
 });

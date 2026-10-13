@@ -36,6 +36,7 @@ import { runMemoryExtraction } from "./memory-extraction";
 import { withPromptCache } from "./prompt-cache";
 import { stepsToUIMessageParts } from "./step-ui-messages";
 import { loadSystemPrompt } from "./system-prompt";
+import { deviceDescription } from "../devices/observation-tools";
 
 // A voice turn (plan 4.11): what the device's microphone heard is appended to
 // the device's conversation as a <heard> message; the agent replies, streamed,
@@ -188,6 +189,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       agentPrompt: agent.systemPrompt,
       memorySystemPrompt,
       deviceName: device.name,
+      description: deviceDescription(device),
     });
     // No speak tool: the reply itself is spoken.
     const { speak: _speak, ...tools } = buildDeviceTools({

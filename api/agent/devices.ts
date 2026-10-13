@@ -41,9 +41,13 @@ export const GET: express.RequestHandler = async (req, res) => {
     );
 }
 
+const DESCRIPTION = z.string().trim().max(1000);
+
 const createSchema = z
     .object({
         name: z.string().trim().min(1).max(100),
+        // What the device is and what it's for; agents read it.
+        description: DESCRIPTION.optional(),
         // An existing agent for the device to work for. Without it, a new agent
         // named after the device is created (plan 4.6, D3).
         agent_id: z.uuid().optional(),
@@ -65,7 +69,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         res.status(400).json({ error: parsed.error.issues });
         return;
     }
-    const { name, agent_id, memory_pool_id, timezone } = parsed.data;
+    const { name, description, agent_id, memory_pool_id, timezone } = parsed.data;
 
     let agent: Agent;
     let user: SessionUser;
@@ -107,6 +111,7 @@ export const POST: express.RequestHandler = async (req, res) => {
         ownerId: user.id,
         agentId: agent.id,
         name,
+        description: description || null,
         tokenHash: hash,
         settings: { ...DEFAULT_DEVICE_SETTINGS, timezone: timezone ?? null },
     });
@@ -120,6 +125,8 @@ export const POST: express.RequestHandler = async (req, res) => {
 const updateSchema = z.object({
     id: z.uuid(),
     name: z.string().trim().min(1).max(100).optional(),
+    // null or "" clears it.
+    description: DESCRIPTION.nullable().optional(),
     agent_id: z.uuid().optional(),
     settings: deviceSettingsPatchSchema.optional(),
 });
@@ -130,7 +137,7 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         res.status(400).json({ error: parsed.error.issues });
         return;
     }
-    const { id, name, agent_id, settings } = parsed.data;
+    const { id, name, description, agent_id, settings } = parsed.data;
 
     const access = await resolveDeviceAccess(req, id, { owner: true });
     if (!access.ok) {
@@ -148,7 +155,12 @@ export const PATCH: express.RequestHandler = async (req, res) => {
     }
 
     const merged = settings && mergeDeviceSettings(readDeviceSettings(access.device.settings), settings);
-    const device = await updateDevice(id, { name, agentId: agent_id, settings: merged });
+    const device = await updateDevice(id, {
+        name,
+        description: description === undefined ? undefined : description || null,
+        agentId: agent_id,
+        settings: merged,
+    });
     if (!device) {
         res.status(404).json({ error: "Device not found" });
         return;
