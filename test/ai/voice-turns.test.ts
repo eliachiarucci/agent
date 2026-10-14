@@ -1,5 +1,7 @@
-import { generateText, type ModelMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { generateText, stepCountIs, type ModelMessage, type ToolSet } from "ai";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { buildGmailTools, gmailPromptFor, gmailApprovalTargetsFor, gmailToolInfo } from "../../lib/agent/connectors/gmail";
+import { filterConnectorTools } from "../../lib/agent/connectors/shared";
 import { SILENT, deviceSystemPrompt } from "../../lib/agent/device-run";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
 import { heardNotes } from "../../lib/agent/voice-turn";
@@ -7,6 +9,7 @@ import { perceptionProviderOptions } from "../../lib/devices/perception-model";
 import type { HeardTurn } from "../../lib/devices/voice/session";
 import { heardBlock, type HeardLine } from "../../lib/devices/voice/text";
 import { chatModelFromSettings } from "../../lib/global/ai";
+import { closeDb, makeUserWithAgent } from "../helpers/db";
 
 // Voice turns against a real model: does the agent answer, or stay <silent/>,
 // in the conversations that went wrong on 2026-10-14 (plan rev 19)? Each
@@ -39,6 +42,11 @@ const tv = (): ModelMessage[] => [
 ];
 
 async function reply(messages: ModelMessage[]): Promise<string> {
+  return (await turn(messages)).text;
+}
+
+// One turn, with tools: the reply, the tool calls made and the messages the turn added.
+async function turn(messages: ModelMessage[], tools?: ToolSet) {
   const system = deviceSystemPrompt({
     basePrompt: await loadSystemPrompt(),
     agentPrompt: null,
@@ -46,15 +54,50 @@ async function reply(messages: ModelMessage[]): Promise<string> {
     deviceName: "Dino",
     description: "A small rover with a camera, a microphone and a speaker, in Elia's flat.",
     disabledTools: [],
+    connectorsPrompt: tools ? gmailPromptFor(tools) : undefined,
   });
   const result = await generateText({
     model: chatModelFromSettings("openrouter", { apiKey: KEY, region: "eu" }, MODEL),
     system,
     messages,
+    tools,
+    stopWhen: stepCountIs(4),
     providerOptions: perceptionProviderOptions("openrouter", MODEL),
-    maxOutputTokens: 200,
+    maxOutputTokens: 400,
   });
-  return result.text.trim();
+  return {
+    text: result.text.trim(),
+    calls: result.steps.flatMap((step) => step.toolCalls.map((call) => call.toolName)),
+    added: result.response.messages,
+  };
+}
+
+// The Gmail tools as a device gets them ("ask" ones behind a spoken yes), on a fake mailbox.
+function mailbox(userId: string, agentId: string, conversationId: string, turnId: string) {
+  const sent = vi.fn(async () => ({ message_id: "m-9", note: "Email sent." }));
+  const real = buildGmailTools(userId, undefined, "allow");
+  const fake: ToolSet = {
+    search_threads: {
+      ...real.search_threads,
+      execute: async () => ({
+        threads: [
+          { thread_id: "t-1", subject: "Your order has shipped", from: "Amazon <ship@amazon.it>", date: "Wed, 14 Oct 2026 09:12", message_count: 1, snippet: "Arriving Friday" },
+          { thread_id: "t-2", subject: "Dinner on Saturday?", from: "Marco Rossi <marco@example.com>", date: "Wed, 14 Oct 2026 15:40", message_count: 1, snippet: "Are you free on Saturday evening?" },
+        ],
+      }),
+    },
+    get_thread: { ...real.get_thread, execute: async () => ({ error: "not in this test" }) },
+    send_email: { ...real.send_email, execute: sent },
+  };
+  const tools = filterConnectorTools({
+    connector: "gmail",
+    userId,
+    tools: fake,
+    toolInfo: gmailToolInfo,
+    approval: { agentId, spoken: { conversationId, turnId, heard: true } },
+    targetsFor: gmailApprovalTargetsFor,
+  });
+  return { tools, sent };
 }
 
 async function expectAnswer(messages: ModelMessage[]) {
@@ -73,6 +116,8 @@ async function expectSilent(messages: ModelMessage[]) {
 }
 
 describe.skipIf(!KEY)("voice turns with a real model", () => {
+  afterAll(closeDb);
+
   it("answers a follow-up moments after it spoke, garbled word and all", async () => {
     await expectAnswer([
       heard([me("It is an amplifier module. These are not screw terminals, you see? These are banana plug terminals.")]),
@@ -116,5 +161,33 @@ describe.skipIf(!KEY)("voice turns with a real model", () => {
       ...tv().slice(0, 2),
       heard([other(2, "Place you on 10 years probation."), other(3, "Yes, your honour.")], { sinceReplyMs: 12_000 }),
     ]);
+  });
+
+  it("reads the owner's email when asked", async () => {
+    const { user, agent } = await makeUserWithAgent("Mail reader");
+    for (let i = 0; i < RUNS; i++) {
+      const { tools } = mailbox(user.id, agent.id, `read-${i}`, "turn-1");
+      const result = await turn([heard([me("Dino, do I have any new emails?")])], tools);
+      expect(result.calls, `run ${i + 1}`).toContain("search_threads");
+      expect(result.text.startsWith(SILENT), `run ${i + 1} stayed silent`).toBe(false);
+    }
+  });
+
+  it("sends an email only after a spoken yes", async () => {
+    const { user, agent } = await makeUserWithAgent("Mail sender");
+    for (let i = 0; i < RUNS; i++) {
+      const conversation = `send-${i}`;
+      const ask = heard([me("Dino, email marco@example.com that I'll be ten minutes late for dinner.")]);
+      const first = mailbox(user.id, agent.id, conversation, "turn-1");
+      const asked = await turn([ask], first.tools);
+      expect(first.sent, `run ${i + 1} sent without a yes`).not.toHaveBeenCalled();
+      expect(asked.text.startsWith(SILENT), `run ${i + 1} didn't ask`).toBe(false);
+
+      const second = mailbox(user.id, agent.id, conversation, "turn-2");
+      const yes = heard([me("Yes, send it.")], { sinceReplyMs: 3_000 });
+      const done = await turn([ask, ...asked.added, yes], second.tools);
+      expect(second.sent, `run ${i + 1} didn't send after the yes`).toHaveBeenCalledTimes(1);
+      expect(done.text.startsWith(SILENT)).toBe(false);
+    }
   });
 });

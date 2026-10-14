@@ -6,7 +6,8 @@ import {
   type ConnectorType,
   type ToolPermissionLevel,
 } from "../../global/schema";
-import type { ConnectorToolInfo } from "./shared";
+import type { ConnectorApproval, ConnectorToolInfo } from "./shared";
+import type { SpokenApproval } from "./spoken-approval";
 import {
   buildGmailTools,
   GMAIL_SCOPES,
@@ -36,7 +37,7 @@ export const CONNECTOR_CATALOG: Record<
     buildTools: (
       userId: string,
       permissions?: Record<string, ToolPermissionLevel>,
-      approval?: { agentId: string } | "allow"
+      approval?: ConnectorApproval
     ) => ToolSet;
     promptFor: (tools: ToolSet) => string;
     approvalTargetsFor: (toolName: string, input: unknown) => string[] | null;
@@ -87,7 +88,8 @@ export function connectorApprovalTargets(
  * sender has, filtered by their per-agent permission levels (Settings → Tools).
  * In interactive runs (chat), "ask" tools are offered with a `needsApproval`
  * gate that pauses the stream for the user unless a standing (tool, target)
- * approval covers the call; headless runs (cron) withhold them like "deny".
+ * approval covers the call; headless runs (cron) withhold them like "deny";
+ * on a device they run after a spoken yes (spoken-approval.ts).
  * Returns the tools plus the matching system-prompt sections. Stable for a
  * given (user, agent, settings), so the prompt prefix stays KV-cache friendly.
  */
@@ -99,13 +101,17 @@ export async function buildConnectorTools(opts: {
   // "deny" (default) or run them unattended like "allow" (a cron job's
   // creator-picked askPolicy). Ignored when interactive.
   headlessAskPolicy?: "deny" | "allow";
+  // A device's conversation: "ask" tools run after a spoken yes.
+  spoken?: SpokenApproval;
 }): Promise<{ tools: ToolSet; prompt: string }> {
   const [connectors, permissions] = await Promise.all([
     listConnectorSettings(opts.userId),
     getToolPermissions(opts.userId, opts.agentId),
   ]);
 
-  const approval = opts.interactive
+  const approval: ConnectorApproval | undefined = opts.spoken
+    ? { agentId: opts.agentId, spoken: opts.spoken }
+    : opts.interactive
     ? { agentId: opts.agentId }
     : opts.headlessAskPolicy === "allow"
       ? ("allow" as const)

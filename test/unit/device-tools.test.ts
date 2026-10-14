@@ -28,7 +28,9 @@ const prompt = (disabledTools: any[]) =>
 
 describe("device tools", () => {
   it("leaves out the tools switched off, and the rules don't mention them", () => {
-    expect(tools([])).toEqual(expect.arrayContaining(["speak", "zoom", "takePicture", "searchObservations", "listNotes"]));
+    expect(tools([])).toEqual(
+      expect.arrayContaining(["speak", "zoom", "takePicture", "searchObservations", "listNotes", "webSearch", "readPage"])
+    );
     const some = tools(["speak", "takePicture"]);
     expect(some).not.toContain("speak");
     expect(some).not.toContain("takePicture");

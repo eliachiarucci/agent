@@ -320,8 +320,9 @@ describe("look and agent runs", () => {
 
     // The run's first request: the device's tools, and the frame inline.
     const tools = runRequests[0].tools.map((t: any) => t.function.name);
-    expect(tools).toEqual(expect.arrayContaining(["speak", "zoom", "searchObservations", "remember", "getDate"]));
-    expect(tools).not.toContain("webSearch");
+    expect(tools).toEqual(
+      expect.arrayContaining(["speak", "zoom", "searchObservations", "remember", "getDate", "webSearch", "readPage"])
+    );
     const user = runRequests[0].messages.find((m: any) => m.role === "user");
     expect(JSON.stringify(user.content)).toContain("<device-context>");
     expect(user.content.some((p: any) => p.type === "image_url" && p.image_url.url.startsWith("data:image/jpeg"))).toBe(true);

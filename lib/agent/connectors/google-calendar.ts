@@ -1,7 +1,7 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import { ConnectorAuthError, getConnectorAccessToken } from "./google-auth";
-import { filterConnectorTools, read, write, type ConnectorToolInfo } from "./shared";
+import { filterConnectorTools, read, write, type ConnectorApproval, type ConnectorToolInfo } from "./shared";
 import type { ToolPermissionLevel } from "../../global/schema";
 
 // Env-overridable so tests can stub the Calendar API with a local server.
@@ -475,7 +475,7 @@ export function googleCalendarApprovalTargetsFor(toolName: string, input: unknow
 export function buildGoogleCalendarTools(
   userId: string,
   permissions?: Record<string, ToolPermissionLevel>,
-  approval?: { agentId: string } | "allow"
+  approval?: ConnectorApproval
 ): ToolSet {
   return filterConnectorTools({
     connector: "google-calendar",

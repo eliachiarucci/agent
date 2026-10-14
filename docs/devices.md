@@ -65,7 +65,7 @@ as a `config` message.
 | `voice.languageHints` | `["en", "it"]` | Languages the speech-to-text expects (others are still detected) |
 | `voice.endOfTurnMs` | 700 | Silence after the device's last speech segment before the turn is finalised (300 until plan rev 19; migration 0024 moved devices still on 300) |
 | `voice.closeAfterSec` | 45 | The speech-to-text connection closes after this long without speech |
-| `tools.disabled` | `[]` | Device tools switched off: any of `speak`, `zoom`, `takePicture`, `searchObservations`. They leave the runs' and voice turns' tool sets, and the rules stop mentioning them |
+| `tools.disabled` | `[]` | Device tools switched off: any of `speak`, `zoom`, `takePicture`, `searchObservations`, `connectors` (the agent's Gmail and Calendar as a whole). They leave the runs' and voice turns' tool sets, and the rules stop mentioning them |
 
 Settings saved before plan rev 17 had a separate `route` (`{ only, allowFallbacks }`) on each model; reading them
 moves its first endpoint into the model id (`readDeviceSettings`), and PATCH no longer takes it.
@@ -168,8 +168,12 @@ spoken in the last hour, the last utterance).
   providers turn image tool results into JSON text, so it's a user message). During the call `prepareStep` adds it;
   on later calls `insertStoredPictures` puts every earlier picture back from its file, so the agent can look again.
   They aren't windowed like camera frames (few, asked for, never changed, so the prompt stays cacheable); compaction
-  summarises them away with the rest. Also `searchObservations`, `getDate`, notes. No web
-  search, connectors or scheduling: the camera is untrusted input. 6 steps at most.
+  summarises them away with the rest. Also `searchObservations`, `getDate`, notes, web search (`webSearch`,
+  `readPage`) and the owner's connectors (Gmail, Calendar) with the agent's permissions from Settings → Tools
+  (`deviceConnectorTools`; off with the device's `connectors` switch). There is no Approve button on a device: an
+  `ask` tool's first call doesn't run and tells the model to ask out loud; the same tool for the same targets runs
+  when called again in a later voice turn, after the person answered (`lib/agent/connectors/spoken-approval.ts`,
+  in memory, 10 minutes). No scheduling. 6 steps at most.
 - **Identity:** the camera never identifies anyone. The run's prompt forbids naming people in view, even as one of the
   people the agent serves; names will come only from the face module (plan 4.8).
 - **After the run:** the headless compaction check, and memory extraction with the label "`<device> observation`"

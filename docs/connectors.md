@@ -69,14 +69,18 @@ module + catalog entry each — see `CONNECTOR_CATALOG` in
   user's own attendee entry while sending the list back whole (a PATCH on
   `attendees` replaces it).
 - Assembly (`lib/agent/connectors/index.ts`): `buildConnectorTools({ userId,
-  agentId, interactive, headlessAskPolicy })` returns the tools of every
+  agentId, interactive, headlessAskPolicy, spoken })` returns the tools of every
   *connected* connector filtered by the sender's per-agent permission levels,
   plus the matching system-prompt sections. `allow` tools are always offered;
   `ask` tools are offered with a `needsApproval` gate in interactive runs (the
   chat route) and withheld like `deny` in headless runs (cron — nobody is
   there to ask), unless the run passes `headlessAskPolicy: "allow"` (a cron
   job whose creator set `ask_policy` to `allow` — the gated tools run
-  unattended for that job only). The prompt/toolset is stable per (user,
+  unattended for that job only). On a device (`spoken`, the device's
+  conversation and turn) `ask` tools run after a spoken yes: the first call
+  returns a "needs a yes out loud" result, and the same tool for the same
+  targets runs when called in a later voice turn
+  (`spoken-approval.ts`). The prompt/toolset is stable per (user,
   agent, settings), so the KV-cache prefix rule holds.
 - Routes: `GET /agent/connectors` (catalog + masked config; secrets and tokens
   never leave the server), then per connector (`gmail`, `google-calendar` —

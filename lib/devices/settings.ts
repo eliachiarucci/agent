@@ -102,8 +102,10 @@ const voiceSchema = z.object({
 });
 
 // The device's own tools in its agent's runs and voice turns; its owner can
-// switch each off (memory, notes, dates are the agent's and always there).
-export const DEVICE_TOOLS = ["speak", "zoom", "takePicture", "searchObservations"] as const;
+// switch each off (memory, notes, dates and web search are the agent's and
+// always there). "connectors" is the agent's connectors (Gmail, Calendar) as
+// a whole, with their per-agent permissions from Settings → Tools.
+export const DEVICE_TOOLS = ["speak", "zoom", "takePicture", "searchObservations", "connectors"] as const;
 export type DeviceTool = (typeof DEVICE_TOOLS)[number];
 
 const toolsSchema = z.object({

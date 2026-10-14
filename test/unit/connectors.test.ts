@@ -14,6 +14,12 @@ import {
   gmailToolInfo,
 } from "../../lib/agent/connectors/gmail";
 import { buildConnectorTools } from "../../lib/agent/connectors";
+import { tool, type ToolExecutionOptions } from "ai";
+import { z } from "zod";
+import { filterConnectorTools, write } from "../../lib/agent/connectors/shared";
+import { SPOKEN_APPROVAL_NEEDED, spokenApprovalFor } from "../../lib/agent/connectors/spoken-approval";
+import { deviceConnectorTools } from "../../lib/agent/device-run";
+import { DEFAULT_DEVICE_SETTINGS, mergeDeviceSettings } from "../../lib/devices/settings";
 import {
   getConnectorSetting,
   setConnectorEnabled,
@@ -552,6 +558,86 @@ describe("buildConnectorTools", () => {
     const result = await buildConnectorTools({ userId: user.id, agentId: agent.id });
     expect(Object.keys(result.tools)).toHaveLength(0);
     expect(result.prompt).toBe("");
+  });
+});
+
+describe("spoken approval (devices)", () => {
+  const options = { toolCallId: "call", messages: [] } as unknown as ToolExecutionOptions;
+  // send_email at "ask", its real execute replaced by a spy.
+  function sendTool(userId: string, agentId: string, conversationId: string, turnId: string, heard: boolean) {
+    const sent = vi.fn(async () => ({ sent: true }));
+    const tools = filterConnectorTools({
+      connector: "gmail",
+      userId,
+      tools: { send_email: tool({ inputSchema: z.object({ to: z.array(z.string()) }), execute: sent }) },
+      toolInfo: [write("send_email", "Send")],
+      approval: { agentId, spoken: { conversationId, turnId, heard } },
+      targetsFor: (_name, input) => (input as { to: string[] }).to.map((t) => t.toLowerCase()),
+    });
+    const call = (to: string[]) => tools.send_email.execute!({ to }, options);
+    return { tools, sent, call };
+  }
+
+  it("runs an \"ask\" tool only when a later heard turn calls it again, for the same targets", async () => {
+    const { user, agent } = await makeUserWithAgent("Speaker");
+    const turn = (id: string, heard = true) => sendTool(user.id, agent.id, "conv-1", id, heard);
+
+    // No UI to pause for: offered without needsApproval; the first call asks.
+    const a = turn("turn-a");
+    expect(a.tools.send_email.needsApproval).toBeUndefined();
+    expect(await a.call(["marco@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+    // Again in the same turn: the model can't approve itself.
+    expect(await a.call(["marco@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+    expect(a.sent).not.toHaveBeenCalled();
+
+    // The person answered (the next heard turn), but about someone else: ask again.
+    const b = turn("turn-b");
+    expect(await b.call(["anna@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+    // The same recipient: the yes covers it, once.
+    expect(await b.call(["Marco@example.com"])).toEqual({ sent: true });
+    expect(b.sent).toHaveBeenCalledTimes(1);
+    const c = turn("turn-c");
+    expect(await c.call(["marco@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+
+    // An agent run (woken by the camera, nobody answered) never runs it; a voice turn after it does.
+    const run = turn("run-1", false);
+    expect(await run.call(["luca@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+    expect(await turn("run-2", false).call(["luca@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+    expect(await turn("turn-d").call(["luca@example.com"])).toEqual({ sent: true });
+
+    // Pending requests belong to their conversation.
+    await turn("turn-e").call(["eva@example.com"]);
+    const other = sendTool(user.id, agent.id, "conv-2", "turn-f", true);
+    expect(await other.call(["eva@example.com"])).toEqual(SPOKEN_APPROVAL_NEEDED);
+  });
+
+  it("runs directly under a standing approval", async () => {
+    const { user, agent } = await makeUserWithAgent("Standing");
+    await addToolApprovals({ userId: user.id, agentId: agent.id, connector: "gmail", tool: "send_email", targets: ["marco@example.com"] });
+    const t = sendTool(user.id, agent.id, "conv-3", "turn-a", true);
+    expect(await t.call(["marco@example.com"])).toEqual({ sent: true });
+  });
+
+  it("forgets a request after 10 minutes", () => {
+    const approval = (turnId: string) => ({ conversationId: "conv-4", turnId, heard: true });
+    const t0 = 1_000_000;
+    expect(spokenApprovalFor(approval("a"), "send_email", ["x"], t0)).toBe("ask");
+    expect(spokenApprovalFor(approval("b"), "send_email", ["x"], t0 + 11 * 60_000)).toBe("ask");
+    expect(spokenApprovalFor(approval("c"), "send_email", ["x"], t0 + 12 * 60_000)).toBe("run");
+  });
+
+  it("gives a device the owner's connectors with \"ask\" tools gated, unless its switch is off", async () => {
+    const { user, agent } = await connectedUser();
+    const params = { ownerId: user.id, agentId: agent.id, conversationId: "conv-5", turnId: "t", heard: true };
+    const on = await deviceConnectorTools({ ...params, settings: DEFAULT_DEVICE_SETTINGS });
+    expect(on.prompt).toContain("## Gmail");
+    expect(on.tools.search_threads).toBeDefined();
+    expect(on.tools.send_email).toBeDefined();
+    expect(on.tools.send_email.needsApproval).toBeUndefined();
+
+    const settings = mergeDeviceSettings(DEFAULT_DEVICE_SETTINGS, { tools: { disabled: ["connectors"] } });
+    const off = await deviceConnectorTools({ ...params, settings });
+    expect(off).toEqual({ tools: {}, prompt: "" });
   });
 });
 

@@ -25,6 +25,7 @@ import {
   SILENT,
   buildDeviceTools,
   defaultDeviceRunDeps,
+  deviceConnectorTools,
   deviceSystemPrompt,
   loadDeviceConversation,
   resolveRunModel,
@@ -144,7 +145,8 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
     : null;
   const memoryScope = agent.chatMemoryEnabled ? scope : null;
   const heardText = turn.lines.map((l) => l.text).join("\n");
-  const [basePrompt, memoriesBlock, memorySystemPrompt] = await Promise.all([
+  const turnId = crypto.randomUUID();
+  const [basePrompt, memoriesBlock, memorySystemPrompt, connectors] = await Promise.all([
     loadSystemPrompt(),
     memoryScope ? buildRelevantMemoriesBlock(memoryScope, heardText.slice(-2000)) : null,
     memoryScope
@@ -154,13 +156,14 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
           deviceName: device.name,
         })
       : "",
+    deviceConnectorTools({ settings, ownerId: owner.id, agentId: agent.id, conversationId, turnId, heard: true }),
   ]);
 
   const metadata: VoiceTurnMetadata = {
     voiceTurn: { at: turn.at.toISOString(), speakers: [...new Set(turn.lines.map((l) => l.speaker))] },
   };
   history.push({
-    id: crypto.randomUUID(),
+    id: turnId,
     role: "user",
     metadata,
     parts: [...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []), { type: "text", text: heard }],
@@ -209,6 +212,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       deviceName: device.name,
       description: deviceDescription(device),
       disabledTools: settings.tools.disabled,
+      connectorsPrompt: connectors.prompt,
     });
     // No speak tool: the reply itself is spoken.
     const pictures = new TakenPictures();
@@ -222,6 +226,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       agentId: agent.id,
       ownerId: owner.id,
       pictures,
+      connectorTools: connectors.tools,
     });
     const modelView = await inlineImageFileParts(
       windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),

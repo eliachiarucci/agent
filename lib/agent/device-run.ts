@@ -40,6 +40,7 @@ import { MAX_SPEECH_CHARS, speak } from "../devices/speech";
 import { localDate, localDayLabel, localTime } from "../devices/time";
 import { applyCompaction, planChatCompaction, usageTokens } from "./compaction";
 import type { ContextTarget } from "./context";
+import { buildConnectorTools } from "./connectors";
 import { buildDateTools, dateToolPrompt } from "./date-tool";
 import { resolveDefaultModelTarget } from "./default-model";
 import { MAX_UPLOAD_BYTES, readConversationFileBytes, writeConversationFileBytes } from "./files";
@@ -54,6 +55,7 @@ import {
 import { runMemoryExtraction } from "./memory-extraction";
 import { buildNoteTools, notesPrompt } from "./notes";
 import { mergeProviderOptions, promptCacheProviderOptions, withPromptCache } from "./prompt-cache";
+import { searchTools, webSearchPrompt } from "./search";
 import { stepsToUIMessageParts } from "./step-ui-messages";
 import { loadSystemPrompt } from "./system-prompt";
 
@@ -293,13 +295,46 @@ export function deviceSystemPrompt(params: {
   description: string | null;
   // Device tools switched off in its settings; the rules don't mention them.
   disabledTools: readonly DeviceTool[];
+  // The connectors' sections (deviceConnectorTools), if any.
+  connectorsPrompt?: string;
 }): string {
   const agentPrompt = params.agentPrompt?.trim()
     ? `Instructions from this agent's owner:\n${params.agentPrompt.trim()}`
     : "";
-  return [params.basePrompt, agentPrompt, params.memorySystemPrompt, deviceRules(params.deviceName, params.description, params.disabledTools), dateToolPrompt, notesPrompt]
+  return [
+    params.basePrompt,
+    agentPrompt,
+    params.memorySystemPrompt,
+    deviceRules(params.deviceName, params.description, params.disabledTools),
+    webSearchPrompt,
+    dateToolPrompt,
+    notesPrompt,
+    params.connectorsPrompt,
+  ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/**
+ * The owner's connectors (Gmail, Calendar) for the device's agent, with the
+ * agent's permissions from Settings → Tools; "ask" tools run after a spoken
+ * yes (spoken-approval.ts). None when the device's "connectors" switch is off.
+ */
+export async function deviceConnectorTools(params: {
+  settings: DeviceSettings;
+  ownerId: string;
+  agentId: string;
+  conversationId: string;
+  // The user message being answered, and whether it is what the microphone heard.
+  turnId: string;
+  heard: boolean;
+}): Promise<{ tools: ToolSet; prompt: string }> {
+  if (params.settings.tools.disabled.includes("connectors")) return { tools: {}, prompt: "" };
+  return buildConnectorTools({
+    userId: params.ownerId,
+    agentId: params.agentId,
+    spoken: { conversationId: params.conversationId, turnId: params.turnId, heard: params.heard },
+  });
 }
 
 /** The tools of every model call on the device's conversation (the same set keeps the prompt cache warm). */
@@ -316,6 +351,8 @@ export function buildDeviceTools(params: {
   ownerId: string;
   // Where takePicture leaves its pictures; the caller passes pictures.prepareStep to the model call.
   pictures: TakenPictures;
+  // deviceConnectorTools' tools.
+  connectorTools?: ToolSet;
 }) {
   const { device, settings, deps, memoryScope, timeZone, pictures } = params;
   const deviceId = device.id;
@@ -390,6 +427,8 @@ export function buildDeviceTools(params: {
     ...buildObservationTools({ devices: [device], timeZone }),
     ...buildDateTools(timeZone),
     ...buildNoteTools(params.agentId, params.ownerId),
+    ...searchTools,
+    ...params.connectorTools,
   };
   // The tools the owner switched off for this device.
   for (const name of settings.tools.disabled) delete tools[name];
@@ -575,6 +614,14 @@ async function runLocked(
       });
     }
 
+    const connectors = await deviceConnectorTools({
+      settings,
+      ownerId: owner.id,
+      agentId: agent.id,
+      conversationId,
+      turnId: userMessage.id,
+      heard: false,
+    });
     const system = deviceSystemPrompt({
       basePrompt,
       agentPrompt: agent.systemPrompt,
@@ -582,6 +629,7 @@ async function runLocked(
       deviceName: device.name,
       description: deviceDescription(device),
       disabledTools: settings.tools.disabled,
+      connectorsPrompt: connectors.prompt,
     });
     const pictures = new TakenPictures();
     const tools = buildDeviceTools({
@@ -594,6 +642,7 @@ async function runLocked(
       agentId: agent.id,
       ownerId: owner.id,
       pictures,
+      connectorTools: connectors.tools,
     });
 
     const modelView = await inlineImageFileParts(

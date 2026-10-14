@@ -1,6 +1,12 @@
 import type { ToolSet } from "ai";
 import { isToolCallApproved } from "../../db/tool-approvals";
 import type { ConnectorType, ToolPermissionLevel } from "../../global/schema";
+import { SPOKEN_APPROVAL_NEEDED, spokenApprovalFor, type SpokenApproval } from "./spoken-approval";
+
+// How "ask" tools are approved: in the chat UI ({agentId}), not at all because
+// a headless run's creator allowed them ("allow"), or by a spoken yes on a
+// device ({agentId, spoken}). No approval: they are withheld.
+export type ConnectorApproval = { agentId: string; spoken?: SpokenApproval } | "allow";
 
 // The permission catalog the settings UI renders toggles from, one entry per
 // tool of a connector. `defaultLevel` is the level applied when the user never
@@ -36,7 +42,8 @@ export const write = (name: string, description: string): ConnectorToolInfo => (
  * stream for the user to approve or deny in the UI. Headless runs (no
  * `approval` scope, e.g. cron) withhold "ask" tools like "deny" — a tool the
  * user gated must not run with nobody there to ask — unless the caller passes
- * `"allow"` (a cron job whose creator opted its "ask" tools in).
+ * `"allow"` (a cron job whose creator opted its "ask" tools in). On a device
+ * (`spoken`) they run after a spoken yes instead of pausing for the UI.
  */
 export function filterConnectorTools(opts: {
   connector: ConnectorType;
@@ -44,7 +51,7 @@ export function filterConnectorTools(opts: {
   tools: ToolSet;
   toolInfo: ConnectorToolInfo[];
   permissions?: Record<string, ToolPermissionLevel>;
-  approval?: { agentId: string } | "allow";
+  approval?: ConnectorApproval;
   /** Approval targets of one call: string list, or null when the tool is untargeted. */
   targetsFor: (toolName: string, input: unknown) => string[] | null;
 }): ToolSet {
@@ -58,19 +65,36 @@ export function filterConnectorTools(opts: {
       if (level !== "ask" || !opts.approval) return [];
       if (opts.approval === "allow") return [[name, definition]];
       const agentId = opts.approval.agentId;
+      const approved = (input: unknown) =>
+        isToolCallApproved({
+          userId: opts.userId,
+          agentId,
+          connector: opts.connector,
+          tool: name,
+          targets: opts.targetsFor(name, input),
+        });
+      const spoken = opts.approval.spoken;
+      if (spoken) {
+        // A standing approval runs it; otherwise it runs after a spoken yes.
+        return [
+          [
+            name,
+            {
+              ...definition,
+              execute: async (input: unknown, options: Parameters<NonNullable<typeof definition.execute>>[1]) =>
+                (await approved(input)) || spokenApprovalFor(spoken, name, opts.targetsFor(name, input)) === "run"
+                  ? definition.execute!(input, options)
+                  : SPOKEN_APPROVAL_NEEDED,
+            },
+          ],
+        ];
+      }
       return [
         [
           name,
           {
             ...definition,
-            needsApproval: async (input: unknown) =>
-              !(await isToolCallApproved({
-                userId: opts.userId,
-                agentId,
-                connector: opts.connector,
-                tool: name,
-                targets: opts.targetsFor(name, input),
-              })),
+            needsApproval: async (input: unknown) => !(await approved(input)),
           },
         ],
       ];
