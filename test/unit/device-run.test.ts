@@ -155,7 +155,6 @@ function deps(model: MockLanguageModelV3, spoken: string[] = []): DeviceRunDeps 
     capture: async () => {
       throw new Error("not used");
     },
-    ask: async () => "not used",
   };
 }
 

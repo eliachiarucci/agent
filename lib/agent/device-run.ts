@@ -28,13 +28,12 @@ import {
 } from "../db/devices";
 import { getProviderSetting } from "../db/provider-settings";
 import { getUser } from "../db/users";
-import { askAboutImage } from "../devices/caption";
 import { frameFilePath } from "../devices/frames";
 import { DeviceOfflineError, requestCapture } from "../devices/gateway";
 import { withDeviceLock } from "../devices/lock";
 import { publishLive } from "../devices/live";
 import { buildObservationTools, deviceDescription } from "../devices/observation-tools";
-import { perceptionProviderOptions, resolvePerceptionTarget } from "../devices/perception-model";
+import { perceptionProviderOptions } from "../devices/perception-model";
 import type { RunTrigger } from "../devices/run-triggers";
 import { deviceTimeZone, readDeviceSettings, type DeviceSettings, type DeviceTool } from "../devices/settings";
 import { MAX_SPEECH_CHARS, speak } from "../devices/speech";
@@ -43,9 +42,9 @@ import { applyCompaction, planChatCompaction, usageTokens } from "./compaction";
 import type { ContextTarget } from "./context";
 import { buildDateTools, dateToolPrompt } from "./date-tool";
 import { resolveDefaultModelTarget } from "./default-model";
-import { MAX_UPLOAD_BYTES, writeConversationFileBytes } from "./files";
+import { MAX_UPLOAD_BYTES, readConversationFileBytes, writeConversationFileBytes } from "./files";
 import { buildImageFileParts, inlineImageFileParts, windowImageParts } from "./image-parts";
-import { TakenPictures } from "./pictures";
+import { TakenPictures, insertStoredPictures } from "./pictures";
 import {
   buildMemorySystemPrompt,
   buildMemoryTools,
@@ -198,7 +197,6 @@ export type DeviceRunDeps = {
   resolveModel: (device: Device, settings: DeviceSettings) => Promise<RunModel | null>;
   speak: typeof speak;
   capture: typeof requestCapture;
-  ask: (device: Device, settings: DeviceSettings, image: Uint8Array, question: string) => Promise<string>;
 };
 
 export const defaultDeviceRunDeps: DeviceRunDeps = {
@@ -206,11 +204,6 @@ export const defaultDeviceRunDeps: DeviceRunDeps = {
   resolveModel: (device, settings) => resolveRunModel(device.ownerId, settings.agent),
   speak,
   capture: requestCapture,
-  ask: async (device, settings, image, question) => {
-    const target = await resolvePerceptionTarget(device.ownerId, settings.perception);
-    if (!target) throw new Error("No vision model is set up for this device.");
-    return askAboutImage({ target, image, question });
-  },
 };
 
 export type DeviceRunStatus = "done" | "failed" | "over_budget" | "no_model" | "no_agent";
@@ -315,7 +308,7 @@ const PICTURE_MAX_PX = 1568;
 export function buildDeviceTools(params: {
   device: Device;
   settings: DeviceSettings;
-  deps: Pick<DeviceRunDeps, "speak" | "capture" | "ask" | "now">;
+  deps: Pick<DeviceRunDeps, "speak" | "capture" | "now">;
   memoryScope: MemoryScope | null;
   conversationId: string;
   timeZone: string;
@@ -327,6 +320,21 @@ export function buildDeviceTools(params: {
   const { device, settings, deps, memoryScope, timeZone, pictures } = params;
   const deviceId = device.id;
   const runConversationId = params.conversationId;
+
+  // A picture for the model (takePicture, zoom): downscaled, kept in the
+  // conversation's uploads (later calls show it again, insertStoredPictures)
+  // and shown after this call's result (pictures.prepareStep).
+  const keepPicture = async (toolCallId: string, jpeg: Uint8Array, label: string, stem: string) => {
+    // Vision models downscale past ~1568 px anyway; sending less saves upload time and tokens.
+    const image = await sharp(jpeg)
+      .resize({ width: PICTURE_MAX_PX, height: PICTURE_MAX_PX, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    const file = `${stem}-${crypto.randomUUID().slice(0, 8)}.jpg`;
+    await writeConversationFileBytes(runConversationId, file, image, MAX_UPLOAD_BYTES, "upload");
+    pictures.add(toolCallId, { image: new Uint8Array(image), label });
+    return { file, label, note: "The picture follows as an image." };
+  };
   const tools: ToolSet = {
     ...(memoryScope ? buildMemoryTools(memoryScope, { source: "device" }) : {}),
     speak: tool({
@@ -349,19 +357,14 @@ export function buildDeviceTools(params: {
     }),
     zoom: tool({
       description:
-        "Look closer: the device renders a region of the newest frame at full resolution, and a vision model answers your question about it. Coordinates are fractions of the frame (0–1, origin top left).",
-      inputSchema: z.object({
-        region: regionSchema,
-        question: z.string().min(1).max(500).describe("What to find out about the region"),
-      }),
-      execute: async ({ region, question }) => {
+        "Look closer: the device renders a region of the newest frame at full resolution, and you see it as an image (it follows this call). Coordinates are fractions of the frame (0–1, origin top left).",
+      inputSchema: z.object({ region: regionSchema }),
+      execute: async ({ region }, { toolCallId }) => {
         try {
           const result = await deps.capture(deviceId, { region });
           if (result.kind !== "crop") return { error: "The device sent a full frame instead of the region" };
-          const name = `zoom-${localTime(deps.now(), timeZone, true).replaceAll(":", "")}-${crypto.randomUUID().slice(0, 8)}.jpg`;
-          await writeConversationFileBytes(runConversationId, name, result.image, MAX_UPLOAD_BYTES, "upload");
-          const answer = await deps.ask(device, settings, result.image, question);
-          return { answer, file: name, width: result.width, height: result.height };
+          const time = localTime(deps.now(), timeZone, true);
+          return await keepPicture(toolCallId, result.image, `closer view from ${device.name}'s camera, ${time}`, `zoom-${time.replaceAll(":", "")}`);
         } catch (error) {
           if (error instanceof DeviceOfflineError) return { error: "The device is offline" };
           return { error: error instanceof Error ? error.message : String(error) };
@@ -376,16 +379,8 @@ export function buildDeviceTools(params: {
           const result = await deps.capture(deviceId);
           if (result.kind !== "overview" || !result.observation.frame) return { error: "The device sent no picture" };
           const frame = await readFile(frameFilePath(deviceId, result.observation.frame));
-          // Vision models downscale past ~1568 px anyway; sending less saves upload time and tokens.
-          const image = await sharp(frame)
-            .resize({ width: PICTURE_MAX_PX, height: PICTURE_MAX_PX, fit: "inside", withoutEnlargement: true })
-            .jpeg({ quality: 85 })
-            .toBuffer();
           const time = localTime(deps.now(), timeZone, true);
-          const name = `picture-${time.replaceAll(":", "")}-${crypto.randomUUID().slice(0, 8)}.jpg`;
-          await writeConversationFileBytes(runConversationId, name, image, MAX_UPLOAD_BYTES, "upload");
-          pictures.add(toolCallId, { image: new Uint8Array(image), label: `picture from ${device.name}'s camera, ${time}` });
-          return { taken: time, file: name, note: "The picture follows as an image." };
+          return await keepPicture(toolCallId, frame, `picture from ${device.name}'s camera, ${time}`, `picture-${time.replaceAll(":", "")}`);
         } catch (error) {
           if (error instanceof DeviceOfflineError) return { error: "The device is offline" };
           return { error: error instanceof Error ? error.message : String(error) };
@@ -605,7 +600,11 @@ async function runLocked(
       windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),
       conversationId
     );
-    const modelMessages = await convertToModelMessages(modelView, { tools, ignoreIncompleteToolCalls: true });
+    // Pictures taken earlier in the conversation, back in view as images.
+    const modelMessages = await insertStoredPictures(
+      await convertToModelMessages(modelView, { tools, ignoreIncompleteToolCalls: true }),
+      (file) => readConversationFileBytes(conversationId, file, "upload")
+    );
     const result = await generateText({
       model: wrapLanguageModel({
         model: runModel.model as Parameters<typeof wrapLanguageModel>[0]["model"],

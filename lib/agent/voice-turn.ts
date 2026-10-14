@@ -31,7 +31,8 @@ import {
   type DeviceRunDeps,
 } from "./device-run";
 import { inlineImageFileParts, windowImageParts } from "./image-parts";
-import { TakenPictures } from "./pictures";
+import { readConversationFileBytes } from "./files";
+import { TakenPictures, insertStoredPictures } from "./pictures";
 import { buildMemorySystemPrompt, buildRelevantMemoriesBlock, type MemoryScope } from "./memory";
 import { runMemoryExtraction } from "./memory-extraction";
 import { withPromptCache } from "./prompt-cache";
@@ -226,7 +227,11 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),
       conversationId
     );
-    const modelMessages = await convertToModelMessages(modelView, { tools, ignoreIncompleteToolCalls: true });
+    // Pictures taken earlier in the conversation, back in view as images.
+    const modelMessages = await insertStoredPictures(
+      await convertToModelMessages(modelView, { tools, ignoreIncompleteToolCalls: true }),
+      (file) => readConversationFileBytes(conversationId, file, "upload")
+    );
     mark("request");
     const result = streamText({
       model: wrapLanguageModel({

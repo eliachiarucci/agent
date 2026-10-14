@@ -22,7 +22,7 @@ import { latestDeviceConversation } from "../../lib/db/conversations";
 import { createDevice, listDeviceEvents } from "../../lib/db/devices";
 import { withDeviceLock } from "../../lib/devices/lock";
 import { writeFrame } from "../../lib/devices/frames";
-import { TakenPictures } from "../../lib/agent/pictures";
+import { TakenPictures, insertStoredPictures } from "../../lib/agent/pictures";
 import sharp from "sharp";
 import type { AudioHeader } from "../../lib/devices/protocol";
 import { DEFAULT_DEVICE_SETTINGS, mergeDeviceSettings } from "../../lib/devices/settings";
@@ -142,6 +142,38 @@ const pcm = (ms: number) => Buffer.alloc(ms * 32);
 const final = (text: string, speaker = "1"): SttToken => ({ text, speaker, language: "en", isFinal: true });
 
 describe("taken pictures", () => {
+  it("come back from their files on later calls, after their results", async () => {
+    const call = (id: string, toolName: string) => ({
+      role: "assistant" as const,
+      content: [{ type: "tool-call" as const, toolCallId: id, toolName, input: {} }],
+    });
+    const result = (id: string, toolName: string, value: object) => ({
+      role: "tool" as const,
+      content: [{ type: "tool-result" as const, toolCallId: id, toolName, output: { type: "json" as const, value } }],
+    });
+    const messages = [
+      { role: "user" as const, content: "what's this?" },
+      call("a", "takePicture"),
+      result("a", "takePicture", { taken: "16:35:20", file: "picture-a.jpg" }),
+      call("b", "zoom"),
+      result("b", "zoom", { file: "zoom-b.jpg", label: "closer view from Dino's camera, 16:36:00" }),
+      call("c", "searchObservations"),
+      result("c", "searchObservations", { file: "not-a-picture.jpg" }),
+      call("d", "takePicture"),
+      result("d", "takePicture", { file: "deleted.jpg" }),
+    ];
+    const loaded: string[] = [];
+    const out = await insertStoredPictures(messages as any, async (file) => {
+      loaded.push(file);
+      return file === "deleted.jpg" ? null : new Uint8Array([1, 2, 3]);
+    });
+    expect(loaded).toEqual(["picture-a.jpg", "zoom-b.jpg", "deleted.jpg"]);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user", "assistant", "tool", "user", "assistant", "tool", "assistant", "tool"]);
+    expect((out[3].content as any[])[0].text).toBe("[picture from the camera, 16:35:20]");
+    expect((out[6].content as any[])[0].text).toBe("[closer view from Dino's camera, 16:36:00]");
+    expect((out[6].content as any[])[1]).toMatchObject({ type: "image", mediaType: "image/jpeg" });
+  });
+
   it("go right after the tool message holding their result", () => {
     const pictures = new TakenPictures();
     pictures.add("b", { image: new Uint8Array([1]), label: "picture" });
@@ -411,7 +443,6 @@ describe("voice turn", () => {
       capture: async () => {
         throw new Error("not used");
       },
-      ask: async () => "not used",
       synthesize: async ({ text }) => ({
         audio: new Uint8Array(silentWav(400)),
         format: "wav",
@@ -523,6 +554,63 @@ describe("voice turn", () => {
     expect([meta.width, meta.height]).toEqual([1568, 882]);
     const conversation = await latestDeviceConversation(device.id);
     expect(lastTexts(conversation!.messages as UIMessage[]).at(-1)).toBe("assistant: A brown card.");
+
+    // The next turn still sees it: back from the conversation's uploads, after the earlier result.
+    expect(await executeVoiceTurn(device.id, turn("Dino, what colour was it?"), d)).toBe("spoken");
+    const third = prompts[2] as any[];
+    const earlier = third.findIndex((m) => m.role === "tool");
+    expect(third[earlier + 1].content.find((p: any) => p.type === "file")?.mediaType).toBe("image/jpeg");
+    expect(third[earlier + 1].content[0].text).toMatch(/^\[picture from Dino's camera, \d\d:\d\d:\d\d\]$/);
+  });
+
+  it("show a zoomed region to the model itself, not a description of it", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    const crop = await sharp({ create: { width: 2000, height: 1200, channels: 3, background: "#224488" } }).jpeg().toBuffer();
+    const prompts: any[] = [];
+    const finish = {
+      type: "finish" as const,
+      finishReason: { unified: "stop" as const, raw: "stop" },
+      usage: { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } },
+    };
+    const model = new MockLanguageModelV3({
+      provider: "mock",
+      modelId: "mock-voice",
+      doStream: async (options) => {
+        prompts.push(options.prompt);
+        const chunks =
+          prompts.length === 1
+            ? [
+                { type: "stream-start" as const, warnings: [] },
+                { type: "tool-call" as const, toolCallId: "z1", toolName: "zoom", input: JSON.stringify({ region: { x: 0.2, y: 0.2, w: 0.3, h: 0.3 } }) },
+                { ...finish, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" } },
+              ]
+            : [
+                { type: "stream-start" as const, warnings: [] },
+                { type: "text-start" as const, id: "t" },
+                { type: "text-delta" as const, id: "t", delta: "It says 5 volts." },
+                { type: "text-end" as const, id: "t" },
+                finish,
+              ];
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 1 }) };
+      },
+    });
+    const { d } = deps(model, sent);
+    const regions: unknown[] = [];
+    d.capture = async (_id, request) => {
+      regions.push(request?.region);
+      return { kind: "crop", image: new Uint8Array(crop), width: 2000, height: 1200 } as any;
+    };
+    expect(await executeVoiceTurn(device.id, turn("Dino, what does the label say?"), d)).toBe("spoken");
+    expect(regions).toEqual([{ x: 0.2, y: 0.2, w: 0.3, h: 0.3 }]);
+    const second = prompts[1] as any[];
+    const toolAt = second.findIndex((m) => m.role === "tool");
+    const result = second[toolAt].content[0];
+    expect(result.output.value).toMatchObject({ file: expect.stringMatching(/^zoom-.+\.jpg$/), label: expect.stringMatching(/^closer view/) });
+    expect(result.output.value).not.toHaveProperty("answer");
+    const file = second[toolAt + 1].content.find((p: any) => p.type === "file");
+    const meta = await sharp(Buffer.from(file.data)).metadata();
+    expect([meta.width, meta.height]).toEqual([1568, 941]);
   });
 
   it("keep what was said, not stray markup, in the conversation", async () => {
