@@ -94,7 +94,7 @@ export async function speak(
     ? `No voice for "${language}"; spoke with ${voice}, the ${settings.speech.language} voice.`
     : undefined;
   try {
-    const audio = await deps.synthesize({ ownerId: device.ownerId, speech: settings.speech, text, voice });
+    const audio = await deps.synthesize({ ownerId: device.ownerId, speech: settings.speech, text, voice, language });
     const played = await deps.send(device.id, audio);
     if (!played.ok) {
       const reason = played.error ?? "The device couldn't play it.";

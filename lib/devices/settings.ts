@@ -72,15 +72,15 @@ const agentSchema = z.object({
 
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Expected HH:MM");
 
-export const SPEECH_PROVIDERS = ["piper", "openai"] as const;
+export const SPEECH_PROVIDERS = ["piper", "openai", "soniox"] as const;
 export type SpeechProvider = (typeof SPEECH_PROVIDERS)[number];
 
 const speechSchema = z.object({
   // The mute switch: the agent can't speak (the say route still can).
   muted: z.boolean(),
-  // Piper runs in its own container (PIPER_URL); OpenAI uses the owner's key.
+  // Piper runs in its own container (PIPER_URL); OpenAI and Soniox use the owner's key.
   provider: z.enum(SPEECH_PROVIDERS),
-  // OpenAI speech model; NULL → gpt-4o-mini-tts. Unused with Piper.
+  // Speech model; NULL → gpt-4o-mini-tts (OpenAI) or tts-rt-v2 (Soniox). Unused with Piper.
   model: z.string().min(1).max(100).nullable(),
   // BCP-47 tag used when the agent doesn't name a language.
   language: z.string().min(2).max(35),

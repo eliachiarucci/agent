@@ -53,10 +53,10 @@ as a `config` message.
 | `agent.reflectionMin` | 30 | A run that sums up the period, if anything was logged; 0 = off |
 | `agent.runsPerHour` | 30 | Runs per rolling hour (done + failed); triggers over it are dropped |
 | `speech.muted` | `false` | The mute switch for the agent; the say route still works |
-| `speech.provider` | `piper` | Or `openai` (the owner's OpenAI key) |
-| `speech.model` | `null` | OpenAI speech model; `null` → `gpt-4o-mini-tts` |
+| `speech.provider` | `piper` | Or `openai` (the owner's OpenAI key), or `soniox` (the owner's Soniox key, the same as voice mode's) |
+| `speech.model` | `null` | OpenAI or Soniox speech model; `null` → `gpt-4o-mini-tts` / `tts-rt-v2` |
 | `speech.language` | `en` | BCP-47, when the agent names none |
-| `speech.voices` | `{}` | Voice per language over the built-ins (Piper: `en` lessac, `it` paola; OpenAI: `alloy`) |
+| `speech.voices` | `{}` | Voice per language over the built-ins (Piper: `en` lessac, `it` paola; OpenAI: `alloy`; Soniox: `Adrian`, one voice for every language) |
 | `speech.cooldownSec` | 60 | Between agent utterances; `urgent` skips it |
 | `speech.maxPerHour` | 20 | Agent utterances per rolling hour |
 | `speech.quietHours` | 22:00–08:00 | Local, may cross midnight; `null` = never quiet |
@@ -201,6 +201,10 @@ spoken in the last hour, the last utterance).
   runs as its own container: `docker/piper/Dockerfile` (piper-tts 1.8.0, voices `en_US-lessac-medium` and
   `it_IT-paola-medium`), the `piper` service in `docker-compose.yml` (host port 5050; macOS keeps 5000). Piper falls
   back to its default voice for a voice it doesn't have, silently. Or OpenAI `gpt-4o-mini-tts` with the owner's key.
+  Or Soniox (`POST https://tts-rt.soniox.com/tts`, `tts-rt-v2`, WAV at 24 kHz; ~600 voices, each speaking all 63
+  languages, so a device keeps one voice across languages). Soniox generates at about real time and the clip is
+  sent when complete: measured 2026-10-14 on the simulator, first audio 3.7 s after the end of speech (Piper 1.3 s);
+  later sentences are synthesised while earlier ones play.
 - **Delivery:** a binary `speech` message; the device answers `played` after playback. No answer within the clip's
   length + 30 s, or a disconnect, is `{ spoken: false }`.
 

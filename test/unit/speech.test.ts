@@ -1,9 +1,12 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createDevice, listDeviceEvents, type Device } from "../../lib/db/devices";
 import { DEFAULT_DEVICE_SETTINGS, mergeDeviceSettings, type DeviceSettings } from "../../lib/devices/settings";
 import { speak, type SpeakDeps } from "../../lib/devices/speech";
 import { checkSpeechPolicy, inQuietHours } from "../../lib/devices/speech-policy";
-import { parseWav, resolveVoice } from "../../lib/devices/tts";
+import { SpeechUnavailableError, parseWav, resolveVoice, synthesize } from "../../lib/devices/tts";
+import { upsertProviderSetting } from "../../lib/db/provider-settings";
 import { localDayRange, zonedInstant } from "../../lib/devices/time";
 import { generateDeviceToken } from "../../lib/devices/tokens";
 import { closeDb, makeUserWithAgent, resetDb } from "../helpers/db";
@@ -75,6 +78,49 @@ describe("voices and audio", () => {
       "it_IT-riccardo-x_low"
     );
     expect(resolveVoice({ ...speech, provider: "openai" }, "de")).toEqual({ voice: "alloy", fallback: false });
+    // Soniox: one voice for every language, unless one is set per language.
+    expect(resolveVoice({ ...speech, provider: "soniox" }, "it")).toEqual({ voice: "Adrian", fallback: false });
+    expect(resolveVoice({ ...speech, provider: "soniox", voices: { en: "Wesley" } }, "en-US").voice).toBe("Wesley");
+  });
+
+  it("speak with Soniox using the owner's key, the language and WAV", async () => {
+    const requests: { auth?: string; body: any }[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        requests.push({ auth: req.headers.authorization, body: JSON.parse(body) });
+        if (JSON.parse(body).text === "fail") {
+          res.writeHead(402, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error_type: "organization_balance_exhausted", error_message: "Balance exhausted" }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from(wav(700, 24000)));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const env = { url: process.env.SONIOX_TTS_URL, key: process.env.SONIOX_API_KEY };
+    process.env.SONIOX_TTS_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/tts`;
+    delete process.env.SONIOX_API_KEY;
+    try {
+      const { user } = await makeUserWithAgent("Ada");
+      const soniox = { ...speech, provider: "soniox" as const };
+      const params = { ownerId: user.id, speech: soniox, text: "Ciao.", voice: "Adrian", language: "it-IT" };
+      await expect(synthesize(params)).rejects.toBeInstanceOf(SpeechUnavailableError);
+      await upsertProviderSetting(user.id, "soniox", { apiKey: "snx-key" });
+      expect(await synthesize(params)).toMatchObject({ format: "wav", sampleRate: 24000, durationMs: 700 });
+      expect(requests[0]).toEqual({
+        auth: "Bearer snx-key",
+        body: { model: "tts-rt-v2", voice: "Adrian", language: "it", text: "Ciao.", audio_format: "wav" },
+      });
+      await expect(synthesize({ ...params, text: "fail" })).rejects.toThrow(/HTTP 402: Balance exhausted/);
+    } finally {
+      server.close();
+      if (env.url === undefined) delete process.env.SONIOX_TTS_URL;
+      else process.env.SONIOX_TTS_URL = env.url;
+      if (env.key !== undefined) process.env.SONIOX_API_KEY = env.key;
+    }
   });
 
   it("read the sample rate and length of a WAV", () => {

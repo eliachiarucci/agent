@@ -167,7 +167,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
   const quiet = inQuietHours(settings.speech.quietHours, deps.now(), timeZone);
   const language = mainLanguage(turn) ?? settings.speech.language;
   const { voice } = resolveVoice(settings.speech, language);
-  const speaker = new ReplySpeaker(device, settings, voice, deps, () => mark("firstAudio"));
+  const speaker = new ReplySpeaker(device, settings, voice, language, deps, () => mark("firstAudio"));
 
   const abort = new AbortController();
   let interrupted = false;
@@ -355,6 +355,7 @@ class ReplySpeaker {
     private readonly device: Device,
     private readonly settings: DeviceSettings,
     private readonly voice: string,
+    private readonly language: string,
     private readonly deps: VoiceTurnDeps,
     private readonly onFirstAudio: () => void
   ) {}
@@ -375,6 +376,7 @@ class ReplySpeaker {
           speech: this.settings.speech,
           text,
           voice: this.voice,
+          language: this.language,
         });
         if (this.stopped) return;
         this.onFirstAudio();
