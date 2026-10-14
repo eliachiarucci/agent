@@ -1,7 +1,13 @@
 import { z } from "zod";
-import type { ProviderType } from "./schema";
+import type { StoredProviderType } from "./schema";
 
-export { PROVIDER_TYPES, type ProviderType } from "./schema";
+export {
+  PROVIDER_TYPES,
+  SPEECH_PROVIDER_TYPES,
+  STORED_PROVIDER_TYPES,
+  type ProviderType,
+  type StoredProviderType,
+} from "./schema";
 
 // Per-provider settings shapes. Stored as JSONB (lib/global/schema.ts) and
 // validated here at the API boundary, so each provider can carry exactly the
@@ -44,7 +50,11 @@ export const providerSchemas = {
     apiKey: z.string().min(1),
     model: z.string().min(1).optional(),
   }),
-} satisfies Record<ProviderType, z.ZodType>;
+  soniox: z.object({
+    // An API key from the Soniox console (console.soniox.com). Speech to text, not a model provider.
+    apiKey: z.string().min(1),
+  }),
+} satisfies Record<StoredProviderType, z.ZodType>;
 
 export type LmStudioSettings = z.infer<(typeof providerSchemas)["lmstudio"]>;
 export type AnthropicSettings = z.infer<(typeof providerSchemas)["anthropic"]>;
@@ -53,6 +63,7 @@ export type DeepInfraSettings = z.infer<(typeof providerSchemas)["deepinfra"]>;
 export type TensorXSettings = z.infer<(typeof providerSchemas)["tensorx"]>;
 export type OpenRouterSettings = z.infer<(typeof providerSchemas)["openrouter"]>;
 export type OpenAISettings = z.infer<(typeof providerSchemas)["openai"]>;
+export type SonioxSettings = z.infer<(typeof providerSchemas)["soniox"]>;
 
 export type ProviderTestResult =
   | { ok: true; models: string[] }
@@ -400,8 +411,34 @@ async function parseModelIds(res: Response): Promise<string[] | undefined> {
 }
 
 /** Runs a cheap authenticated request against the provider to verify the settings. */
+export const SONIOX_API_URL = "https://api.soniox.com/v1";
+
+// GET /models needs a valid key (401 otherwise) and lists the speech models.
+async function testSoniox(settings: SonioxSettings): Promise<ProviderTestResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${SONIOX_API_URL}/models`, {
+      headers: { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, error: "Could not reach the Soniox API. Check your network connection." };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { ok: false, error: "Soniox rejected the API key. Create one in the Soniox console (console.soniox.com)." };
+  }
+  if (!res.ok) return { ok: false, error: `Soniox API responded with HTTP ${res.status}.` };
+  try {
+    const body = (await res.json()) as { models?: { id?: unknown }[] };
+    const models = (body.models ?? []).map((m) => m.id).filter((id): id is string => typeof id === "string");
+    return { ok: true, models };
+  } catch {
+    return { ok: false, error: "Unexpected response from the Soniox API." };
+  }
+}
+
 export async function testProvider(
-  provider: ProviderType,
+  provider: StoredProviderType,
   settings:
     | LmStudioSettings
     | AnthropicSettings
@@ -410,6 +447,7 @@ export async function testProvider(
     | TensorXSettings
     | OpenRouterSettings
     | OpenAISettings
+    | SonioxSettings
 ): Promise<ProviderTestResult> {
   switch (provider) {
     case "lmstudio":
@@ -426,5 +464,7 @@ export async function testProvider(
       return testOpenRouter(settings as OpenRouterSettings);
     case "openai":
       return testOpenAI(settings as OpenAISettings);
+    case "soniox":
+      return testSoniox(settings as SonioxSettings);
   }
 }

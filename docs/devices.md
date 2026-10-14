@@ -165,8 +165,12 @@ spoken in the last hour, the last utterance).
 `lib/devices/voice/` (session, speech to text, text helpers), `lib/agent/voice-turn.ts`. Plan 4.11; phase PV, V1.
 
 - **Listening:** the device sends `audio` while its VAD hears speech. The voice session opens a Soniox real-time
-  stream on the first speech (`stt-rt-v5`, speaker labels and language identification on, its endpoint detection off;
-  `SONIOX_API_KEY`), keeps it alive while idle, and closes it after `voice.closeAfterSec` without speech.
+  stream on the first speech (`stt-rt-v5`, speaker labels and language identification on, its endpoint detection off),
+  keeps it alive while idle, and closes it after `voice.closeAfterSec` without speech.
+- **Soniox key:** the device owner's, stored like a model provider's (Settings → Models → Speech; `provider_settings`
+  row `soniox`, tested with Soniox's `GET /v1/models`). It's looked up for each new stream, so a new key applies to the
+  next one. `SONIOX_API_KEY` in the environment overrides it (development). Without a key the stream fails with
+  `NoSttKeyError`, and the session drops audio for a minute before looking again.
 - **End of turn:** `voice.endOfTurnMs` after a segment ends, the session sends `finalize`; the words up to Soniox's
   `<fin>` are the turn, split into lines by voice ("voice 1: …", with the main language). Speech that resumes before
   `<fin>` joins the same turn. (Smart Turn is planned to decide instead of the fixed wait.)

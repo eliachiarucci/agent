@@ -93,6 +93,16 @@ describe("provider settings", () => {
     expect(noDeepInfraKey.status).toBe(400);
   });
 
+  it("takes Soniox, the speech-to-text provider, like the others", async () => {
+    const client = new TestClient(BASE);
+    await signUp(client, "Pat");
+
+    // A known provider: the key is required, and removing it before it's stored is a 404.
+    expect((await client.post("/agent/providers", { provider: "soniox", settings: {} })).status).toBe(400);
+    expect((await client.post("/agent/provider-test", { provider: "soniox", settings: {} })).status).toBe(400);
+    expect((await client.delete("/agent/providers?provider=soniox")).status).toBe(404);
+  });
+
   it("tests the connection and saves only on success", async () => {
     const client = new TestClient(BASE);
     await signUp(client, "Pat");

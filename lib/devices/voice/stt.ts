@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
+import { getProviderSetting } from "../../db/provider-settings";
 
 // Streaming speech to text (plan 4.11, D25): Soniox's real-time API.
 // Measured in V0 (rev 13): endpoint detection stays off (it hurts the speaker
@@ -27,24 +28,52 @@ export interface SttStream extends EventEmitter {
 
 export type SttOptions = { languageHints: string[] };
 
+/** The stream couldn't start: no Soniox key is stored (Settings → Models). */
+export class NoSttKeyError extends Error {
+  constructor() {
+    super("No Soniox API key: add one in Settings → Models");
+  }
+}
+
 const SONIOX_URL = "wss://stt-rt.soniox.com/transcribe-websocket";
 const KEEPALIVE_MS = 10_000;
 
 export class SonioxStream extends EventEmitter implements SttStream {
-  private ws: WebSocket;
-  private queue: Buffer[] = [];
+  private ws: WebSocket | null = null;
+  // Audio and control messages sent before the stream is ready, in order.
+  private queue: (Buffer | string)[] = [];
   private lastSent = Date.now();
-  private keepalive: NodeJS.Timeout;
+  private keepalive: NodeJS.Timeout | null = null;
   private ready = false;
   private closed = false;
 
-  constructor(apiKey: string, options: SttOptions) {
+  // The key may still be loading: audio queues until it's known and the socket is open.
+  constructor(apiKey: string | Promise<string | null>, private readonly options: SttOptions) {
     super();
+    Promise.resolve(apiKey).then(
+      (key) => {
+        if (this.closed) return;
+        if (key) this.connect(key);
+        else this.fail(new NoSttKeyError());
+      },
+      (error: unknown) => this.fail(error instanceof Error ? error : new Error(String(error)))
+    );
+  }
+
+  private fail(error: Error): void {
+    if (this.closed) return;
+    this.emit("error", error);
+    this.closed = true;
+    this.emit("close");
+  }
+
+  private connect(apiKey: string): void {
+    const options = this.options;
     this.ws = new WebSocket(process.env.SONIOX_URL ?? SONIOX_URL, {
       headers: { authorization: `Bearer ${apiKey}` },
     });
     this.ws.on("open", () => {
-      this.ws.send(
+      this.ws!.send(
         JSON.stringify({
           model: "stt-rt-v5",
           audio_format: "pcm_s16le",
@@ -57,7 +86,7 @@ export class SonioxStream extends EventEmitter implements SttStream {
         })
       );
       this.ready = true;
-      for (const chunk of this.queue.splice(0)) this.ws.send(chunk);
+      for (const item of this.queue.splice(0)) this.ws!.send(item);
     });
     this.ws.on("message", (data) => {
       let msg: any;
@@ -87,7 +116,7 @@ export class SonioxStream extends EventEmitter implements SttStream {
     this.ws.on("error", (error) => this.emit("error", error));
     this.ws.on("close", () => {
       this.closed = true;
-      clearInterval(this.keepalive);
+      if (this.keepalive) clearInterval(this.keepalive);
       this.emit("close");
     });
     // Soniox closes a stream without audio or keepalives for ~20 s.
@@ -103,7 +132,7 @@ export class SonioxStream extends EventEmitter implements SttStream {
   send(pcm: Buffer): void {
     if (this.closed || pcm.length === 0) return;
     this.lastSent = Date.now();
-    if (this.ready) this.ws.send(pcm);
+    if (this.ready) this.ws!.send(pcm);
     else this.queue.push(pcm);
   }
 
@@ -113,24 +142,37 @@ export class SonioxStream extends EventEmitter implements SttStream {
 
   close(): void {
     if (this.closed) return;
-    clearInterval(this.keepalive);
+    if (this.keepalive) clearInterval(this.keepalive);
     // An empty text frame ends the stream; Soniox sends what's left, then closes.
-    if (this.ready) this.ws.send("");
-    else this.ws.terminate();
+    if (this.ready) this.ws!.send("");
+    else if (this.ws) this.ws.terminate();
+    else {
+      // Still waiting for the key: nothing to tear down.
+      this.closed = true;
+      this.emit("close");
+    }
   }
 
   private control(message: object): void {
     if (this.closed) return;
     this.lastSent = Date.now();
     const text = JSON.stringify(message);
-    if (this.ready) this.ws.send(text);
-    else this.ws.once("open", () => this.ws.send(text));
+    if (this.ready) this.ws!.send(text);
+    else this.queue.push(text);
   }
 }
 
-/** The STT stream for a device, or null when no STT key is configured. */
-export function openStt(options: SttOptions): SttStream | null {
-  const key = process.env.SONIOX_API_KEY;
-  if (!key) return null;
-  return new SonioxStream(key, options);
+/**
+ * The Soniox key for a device owner's voice sessions: their stored Soniox
+ * setting (Settings → Models), or SONIOX_API_KEY, which overrides it (development).
+ */
+export async function sonioxKey(ownerId: string): Promise<string | null> {
+  if (process.env.SONIOX_API_KEY) return process.env.SONIOX_API_KEY;
+  return (await getProviderSetting(ownerId, "soniox"))?.settings.apiKey ?? null;
+}
+
+/** A streaming STT connection; without a key it fails with NoSttKeyError and closes. */
+export function openStt(options: SttOptions & { apiKey: string | Promise<string | null> }): SttStream {
+  const { apiKey, ...rest } = options;
+  return new SonioxStream(apiKey, rest);
 }

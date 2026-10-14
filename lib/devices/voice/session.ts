@@ -1,6 +1,6 @@
 import type { AudioHeader } from "../protocol";
 import type { DeviceSettings } from "../settings";
-import { openStt, type SttStream, type SttToken } from "./stt";
+import { NoSttKeyError, openStt, sonioxKey, type SttStream, type SttToken } from "./stt";
 import type { HeardLine } from "./text";
 
 // One voice session per connected device (plan 4.11): audio from the device's
@@ -25,6 +25,7 @@ export type TurnHandler = (deviceId: string, turn: HeardTurn) => void;
 
 type Deps = {
   openStt: typeof openStt;
+  sttKey: (ownerId: string) => Promise<string | null>;
   now: () => number;
 };
 
@@ -32,6 +33,8 @@ type Deps = {
 // (a cough, residual echo) don't (Pipecat/LiveKit use 0.3–0.5 s).
 export const BARGE_IN_MS = 400;
 const BYTES_PER_MS = 32; // 16 kHz, 16-bit mono
+// After "no key", audio is dropped this long before the key is looked up again.
+const NO_KEY_RETRY_MS = 60_000;
 
 export class VoiceSession {
   private stt: SttStream | null = null;
@@ -44,11 +47,12 @@ export class VoiceSession {
   private speechEndAt = 0;
   private endTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
-  private warned = false;
+  private noKeyUntil = 0;
   reply: ActiveReply | null = null;
 
   constructor(
     readonly deviceId: string,
+    private readonly ownerId: string,
     private readonly settings: () => DeviceSettings["voice"],
     private readonly onTurn: () => TurnHandler | null,
     private readonly deps: Deps
@@ -100,16 +104,22 @@ export class VoiceSession {
 
   private ensureStt(voice: DeviceSettings["voice"]): SttStream | null {
     if (this.stt?.open) return this.stt;
-    const stt = this.deps.openStt({ languageHints: voice.languageHints });
-    if (!stt) {
-      if (!this.warned) console.warn(`[voice] ${this.deviceId}: no speech-to-text key (SONIOX_API_KEY); audio ignored`);
-      this.warned = true;
-      return null;
-    }
+    if (this.deps.now() < this.noKeyUntil) return null;
+    // The key is looked up for every new stream, so a key saved in Settings applies to the next one.
+    const stt = this.deps.openStt({ languageHints: voice.languageHints, apiKey: this.deps.sttKey(this.ownerId) });
     this.stt = stt;
     stt.on("tokens", (final: SttToken[]) => this.finals.push(...final));
     stt.on("fin", () => this.onFin());
-    stt.on("error", (error: Error) => console.warn(`[voice] ${this.deviceId}: ${error.message}`));
+    stt.on("error", (error: Error) => {
+      if (error instanceof NoSttKeyError) {
+        if (this.noKeyUntil === 0) console.warn(`[voice] ${this.deviceId}: ${error.message}; audio ignored`);
+        this.noKeyUntil = this.deps.now() + NO_KEY_RETRY_MS;
+        this.finals = [];
+        this.turnAudioMs = 0;
+        return;
+      }
+      console.warn(`[voice] ${this.deviceId}: ${error.message}`);
+    });
     stt.on("close", () => {
       if (this.stt === stt) this.stt = null;
       this.finalizing = false;
@@ -171,7 +181,7 @@ export function linesFromTokens(tokens: SttToken[]): HeardLine[] {
 class VoiceSessions {
   private sessions = new Map<string, VoiceSession>();
   private handler: TurnHandler | null = null;
-  private deps: Deps = { openStt, now: () => Date.now() };
+  private deps: Deps = { openStt, sttKey: sonioxKey, now: () => Date.now() };
 
   setTurnHandler(handler: TurnHandler | null): void {
     this.handler = handler;
@@ -182,10 +192,16 @@ class VoiceSessions {
     this.deps = { ...this.deps, ...deps };
   }
 
-  onAudio(deviceId: string, settings: () => DeviceSettings["voice"], header: AudioHeader, pcm: Buffer): void {
+  onAudio(
+    deviceId: string,
+    ownerId: string,
+    settings: () => DeviceSettings["voice"],
+    header: AudioHeader,
+    pcm: Buffer
+  ): void {
     let session = this.sessions.get(deviceId);
     if (!session) {
-      session = new VoiceSession(deviceId, settings, () => this.handler, this.deps);
+      session = new VoiceSession(deviceId, ownerId, settings, () => this.handler, this.deps);
       this.sessions.set(deviceId, session);
     }
     session.onAudio(header, pcm);

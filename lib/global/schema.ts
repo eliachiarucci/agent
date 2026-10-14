@@ -284,6 +284,13 @@ export const memoryConversations = pgTable(
 
 export const PROVIDER_TYPES = ["lmstudio", "anthropic", "google", "deepinfra", "tensorx", "openrouter", "openai"] as const;
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
+// Providers that aren't language models: their keys are stored and tested like
+// the others (Settings → Models), but they never appear as a model choice.
+// Soniox: speech to text for devices' voice mode (lib/devices/voice/stt.ts).
+export const SPEECH_PROVIDER_TYPES = ["soniox"] as const;
+export type SpeechProviderType = (typeof SPEECH_PROVIDER_TYPES)[number];
+export const STORED_PROVIDER_TYPES = [...PROVIDER_TYPES, ...SPEECH_PROVIDER_TYPES] as const;
+export type StoredProviderType = (typeof STORED_PROVIDER_TYPES)[number];
 
 // Connection settings per provider. Shapes are heterogeneous (LM Studio needs a
 // URL with an optional key, Anthropic and Google only a key), so they live in one JSONB
@@ -304,7 +311,7 @@ export const providerSettings = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    provider: text("provider").$type<ProviderType>().notNull(),
+    provider: text("provider").$type<StoredProviderType>().notNull(),
     settings: jsonb("settings").notNull().$type<ProviderSettingsValue>(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),

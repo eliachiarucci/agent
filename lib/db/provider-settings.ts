@@ -3,7 +3,7 @@ import { db } from "../global/db";
 import {
   providerSettings,
   type ProviderSettingsValue,
-  type ProviderType,
+  type StoredProviderType,
 } from "../global/schema";
 
 export type ProviderSetting = typeof providerSettings.$inferSelect;
@@ -17,7 +17,7 @@ export async function listProviderSettings(userId: string): Promise<ProviderSett
 
 export async function getProviderSetting(
   userId: string,
-  provider: ProviderType
+  provider: StoredProviderType
 ): Promise<ProviderSetting | undefined> {
   return db.query.providerSettings.findFirst({
     where: and(eq(providerSettings.userId, userId), eq(providerSettings.provider, provider)),
@@ -27,7 +27,7 @@ export async function getProviderSetting(
 /** One row per (user, provider): inserting again replaces the settings. */
 export async function upsertProviderSetting(
   userId: string,
-  provider: ProviderType,
+  provider: StoredProviderType,
   settings: ProviderSettingsValue
 ): Promise<ProviderSetting> {
   const [row] = await db
@@ -43,7 +43,7 @@ export async function upsertProviderSetting(
 
 export async function deleteProviderSetting(
   userId: string,
-  provider: ProviderType
+  provider: StoredProviderType
 ): Promise<boolean> {
   const rows = await db
     .delete(providerSettings)
@@ -58,7 +58,7 @@ export async function deleteProviderSetting(
  */
 export async function withStoredApiKey(
   userId: string,
-  provider: ProviderType,
+  provider: StoredProviderType,
   input: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
   if (typeof input.apiKey === "string" && input.apiKey.trim()) return input;

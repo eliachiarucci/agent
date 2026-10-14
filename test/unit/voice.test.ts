@@ -25,7 +25,8 @@ import type { AudioHeader } from "../../lib/devices/protocol";
 import { DEFAULT_DEVICE_SETTINGS, mergeDeviceSettings } from "../../lib/devices/settings";
 import { generateDeviceToken } from "../../lib/devices/tokens";
 import { BARGE_IN_MS, VoiceSession, linesFromTokens, voiceSessions, type HeardTurn } from "../../lib/devices/voice/session";
-import type { SttStream, SttToken } from "../../lib/devices/voice/stt";
+import { NoSttKeyError, SonioxStream, openStt, sonioxKey, type SttStream, type SttToken } from "../../lib/devices/voice/stt";
+import { upsertProviderSetting } from "../../lib/db/provider-settings";
 import { SentenceSplitter, SilenceGate, heardBlock, speakable } from "../../lib/devices/voice/text";
 import { closeDb, makeUserWithAgent, resetDb } from "../helpers/db";
 import { silentWav } from "../helpers/fake-piper";
@@ -134,12 +135,76 @@ const header = (segment: string, seq: number, flags: Partial<AudioHeader> = {}):
 const pcm = (ms: number) => Buffer.alloc(ms * 32);
 const final = (text: string, speaker = "1"): SttToken => ({ text, speaker, language: "en", isFinal: true });
 
+describe("the Soniox key", () => {
+  it("fails a stream without a key, without connecting", async () => {
+    const stream = new SonioxStream(Promise.resolve(null), { languageHints: ["en"] });
+    const errors: Error[] = [];
+    stream.on("error", (e) => errors.push(e));
+    const closed = new Promise((resolve) => stream.once("close", resolve));
+    stream.send(pcm(40));
+    stream.finalize();
+    await closed;
+    expect(errors[0]).toBeInstanceOf(NoSttKeyError);
+    expect(stream.open).toBe(false);
+  });
+
+  it("closes a stream still waiting for its key", async () => {
+    const stream = new SonioxStream(new Promise<string | null>(() => {}), { languageHints: ["en"] });
+    const closed = new Promise((resolve) => stream.once("close", resolve));
+    stream.close();
+    await closed;
+    expect(stream.open).toBe(false);
+  });
+
+  it("drops audio for a minute after 'no key', then looks again", async () => {
+    let now = 1_000_000;
+    let lookups = 0;
+    const s = new VoiceSession("dev", "owner", () => voiceSettings, () => null, {
+      openStt,
+      sttKey: async () => (lookups++, null),
+      now: () => now,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      s.onAudio(header("a", 0, { start: true }), pcm(40));
+      await new Promise((r) => setTimeout(r, 0));
+      s.onAudio(header("a", 1), pcm(40));
+      s.onAudio(header("a", 2), pcm(40));
+      expect(lookups).toBe(1);
+      now += 61_000;
+      s.onAudio(header("a", 3), pcm(40));
+      expect(lookups).toBe(2);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      s.close();
+    }
+  });
+
+  it("is the owner's stored Soniox key, unless SONIOX_API_KEY overrides it", async () => {
+    const { user } = await makeUserWithAgent("Kim");
+    const env = process.env.SONIOX_API_KEY;
+    delete process.env.SONIOX_API_KEY;
+    try {
+      expect(await sonioxKey(user.id)).toBeNull();
+      await upsertProviderSetting(user.id, "soniox", { apiKey: "stored-key" });
+      expect(await sonioxKey(user.id)).toBe("stored-key");
+      process.env.SONIOX_API_KEY = "env-key";
+      expect(await sonioxKey(user.id)).toBe("env-key");
+    } finally {
+      if (env === undefined) delete process.env.SONIOX_API_KEY;
+      else process.env.SONIOX_API_KEY = env;
+    }
+  });
+});
+
 describe("voice session", () => {
   function session() {
     const stt = new FakeStt();
     const turns: HeardTurn[] = [];
-    const s = new VoiceSession("dev", () => voiceSettings, () => (_id, turn) => turns.push(turn), {
+    const s = new VoiceSession("dev", "owner", () => voiceSettings, () => (_id, turn) => turns.push(turn), {
       openStt: () => stt,
+      sttKey: async () => "key",
       now: () => Date.now(),
     });
     return { s, stt, turns };
@@ -333,7 +398,7 @@ describe("voice turn", () => {
     const device = await makeDevice();
     // A session must exist for barge-in; it opens on the first audio.
     voiceSessions.setDeps({ openStt: () => new FakeStt() });
-    voiceSessions.onAudio(device.id, () => voiceSettings, header("a", 0, { start: true }), pcm(100));
+    voiceSessions.onAudio(device.id, device.ownerId, () => voiceSettings, header("a", 0, { start: true }), pcm(100));
     const sent: string[] = [];
     const { d, stops } = deps(streamingModel("Once upon a time, a cat. She lived by the shed. The end."), sent, {
       // Barge in while the second sentence plays.

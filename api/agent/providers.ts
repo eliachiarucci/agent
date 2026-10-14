@@ -1,7 +1,7 @@
 import express from "express";
 import { z } from "zod";
 import { getSessionUser } from "../../lib/agent/actor";
-import { PROVIDER_TYPES, providerSchemas, testProvider } from "../../lib/global/providers";
+import { STORED_PROVIDER_TYPES, providerSchemas, testProvider } from "../../lib/global/providers";
 import {
   deleteProviderSetting,
   listProviderSettings,
@@ -41,7 +41,7 @@ export const GET: express.RequestHandler = async (req, res) => {
 };
 
 const saveSchema = z.object({
-  provider: z.enum(PROVIDER_TYPES),
+  provider: z.enum(STORED_PROVIDER_TYPES),
   settings: z.record(z.string(), z.unknown()),
 });
 
@@ -80,7 +80,7 @@ export const POST: express.RequestHandler = async (req, res) => {
 };
 
 export const DELETE: express.RequestHandler = async (req, res) => {
-  const parsed = z.object({ provider: z.enum(PROVIDER_TYPES) }).safeParse(req.query);
+  const parsed = z.object({ provider: z.enum(STORED_PROVIDER_TYPES) }).safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues });
     return;

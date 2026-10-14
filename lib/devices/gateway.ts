@@ -54,6 +54,8 @@ const MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
 
 type Connection = {
   deviceId: string;
+  // The device's owner: voice mode uses their Soniox key.
+  ownerId: string;
   ws: WebSocket;
   settings: DeviceSettings;
   connectedAt: Date;
@@ -233,7 +235,7 @@ export function attachDeviceGateway(server: Server): () => void {
           return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
-          onConnection(ws, device.id, readDeviceSettings(device.settings), req);
+          onConnection(ws, device.id, device.ownerId, readDeviceSettings(device.settings), req);
         });
       },
       (error) => {
@@ -266,6 +268,7 @@ export function attachDeviceGateway(server: Server): () => void {
 function onConnection(
   ws: WebSocket,
   deviceId: string,
+  ownerId: string,
   settings: DeviceSettings,
   req: IncomingMessage
 ): void {
@@ -276,6 +279,7 @@ function onConnection(
 
   const connection: Connection = {
     deviceId,
+    ownerId,
     ws,
     settings,
     connectedAt: new Date(),
@@ -364,7 +368,13 @@ async function onBinary(connection: Connection, data: Buffer): Promise<void> {
     const audio = audioHeaderSchema.safeParse(header);
     if (!audio.success) throw new ProtocolError("Malformed audio message");
     if (payload.length > MAX_AUDIO_CHUNK_BYTES || payload.length % 2) throw new ProtocolError("Bad audio chunk");
-    voiceSessions.onAudio(connection.deviceId, () => connection.settings.voice, audio.data, Buffer.from(payload));
+    voiceSessions.onAudio(
+      connection.deviceId,
+      connection.ownerId,
+      () => connection.settings.voice,
+      audio.data,
+      Buffer.from(payload)
+    );
     return;
   }
   const parsed = frameHeaderSchema.safeParse(header);
