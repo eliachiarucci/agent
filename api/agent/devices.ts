@@ -17,7 +17,7 @@ import {
     mergeDeviceSettings,
     readDeviceSettings,
 } from "../../lib/devices/settings";
-import { generateDeviceToken } from "../../lib/devices/tokens";
+import { generateDeviceToken, generatePairingCode } from "../../lib/devices/tokens";
 
 export const config = {}
 
@@ -61,8 +61,10 @@ const createSchema = z
         message: "memory_pool_id only applies to a new agent; leave out agent_id",
     });
 
-// Registers a device. The token is in this response only: store it on the
-// device (the server keeps just its hash).
+// Registers a device. The response has a pairing code to type on the device
+// (POST /agent/devices/pair trades it for a token), and the token itself for
+// scripts that set the device up directly; both are in this response only
+// (the server keeps just their hashes).
 export const POST: express.RequestHandler = async (req, res) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -107,18 +109,22 @@ export const POST: express.RequestHandler = async (req, res) => {
     }
 
     const { token, hash } = generateDeviceToken();
+    const pairing = generatePairingCode();
     const device = await createDevice({
         ownerId: user.id,
         agentId: agent.id,
         name,
         description: description || null,
         tokenHash: hash,
+        pairingCodeHash: pairing.hash,
+        pairingExpiresAt: pairing.expiresAt,
         settings: { ...DEFAULT_DEVICE_SETTINGS, timezone: timezone ?? null },
     });
     res.status(201).json({
         device: publicDevice(device, "owner"),
         agent: { id: agent.id, name: agent.name, memoryPoolId: agent.memoryPoolId },
         token,
+        pairing: { code: pairing.code, expiresAt: pairing.expiresAt },
     });
 }
 

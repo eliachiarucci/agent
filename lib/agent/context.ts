@@ -4,7 +4,7 @@
 // The same per-model lookups also report whether the model accepts image input
 // (supportsImages), which drives the composer's attachment button.
 
-import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl } from "../global/providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl, splitOpenRouterModel } from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 
 export type ContextWindow = {
@@ -112,7 +112,8 @@ async function tensorxModelInfo(apiKey: string, model: string): Promise<ModelInf
 // prefer it (conservative for compaction) and fall back to the headline max.
 // architecture.input_modalities says whether the model takes image input.
 // The listing needs no key.
-async function openrouterModelInfo(model: string): Promise<ModelInfo> {
+async function openrouterModelInfo(modelId: string): Promise<ModelInfo> {
+    const { model } = splitOpenRouterModel(modelId);
     const res = await fetch(`${OPENROUTER_BASE_URL}/models`);
     if (!res.ok) return { contextLength: null, supportsImages: null };
     const body = (await res.json()) as {

@@ -40,10 +40,14 @@ export type FrameTrigger = (typeof FRAME_TRIGGERS)[number];
 export const helloSchema = z.object({
   type: z.literal("hello"),
   version: z.string().max(64),
+  // What the device has: a camera (the frame sizes it renders), a speaker (the
+  // audio formats it plays) and a microphone (the formats it streams, voice
+  // mode). The Devices page shows the jobs and tools that fit.
   capabilities: z
     .object({
       sizes: z.array(z.string().max(32)).max(16).optional(),
       audio: z.array(z.string().max(32)).max(16).optional(),
+      microphone: z.array(z.string().max(32)).max(16).optional(),
     })
     .optional(),
 });

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { db } from "../global/db";
 import {
   agentMembers,
@@ -31,6 +31,26 @@ export async function getDeviceByTokenHash(tokenHash: string): Promise<Device | 
   return db.query.devices.findFirst({ where: eq(devices.tokenHash, tokenHash) });
 }
 
+/** The device a pairing code belongs to, while the code is valid. */
+export async function getDeviceByPairingCode(codeHash: string, now = new Date()): Promise<Device | undefined> {
+  return db.query.devices.findFirst({
+    where: and(eq(devices.pairingCodeHash, codeHash), gt(devices.pairingExpiresAt, now)),
+  });
+}
+
+/**
+ * Trades a pairing code for the device's new token hash, once: the code is
+ * cleared in the same statement, so two devices can't both pair with it.
+ */
+export async function completePairing(id: string, codeHash: string, tokenHash: string): Promise<Device | undefined> {
+  const [row] = await db
+    .update(devices)
+    .set({ tokenHash, tokenCreatedAt: new Date(), pairingCodeHash: null, pairingExpiresAt: null, updatedAt: new Date() })
+    .where(and(eq(devices.id, id), eq(devices.pairingCodeHash, codeHash)))
+    .returning();
+  return row;
+}
+
 export async function listAllDevices(): Promise<Device[]> {
   return db.select().from(devices);
 }
@@ -51,7 +71,20 @@ export async function listDevicesForUser(userId: string): Promise<Device[]> {
 export async function updateDevice(
   id: string,
   changes: Partial<
-    Pick<Device, "name" | "description" | "agentId" | "settings" | "tokenHash" | "tokenCreatedAt" | "hello" | "telemetry" | "lastSeenAt">
+    Pick<
+      Device,
+      | "name"
+      | "description"
+      | "agentId"
+      | "settings"
+      | "tokenHash"
+      | "tokenCreatedAt"
+      | "pairingCodeHash"
+      | "pairingExpiresAt"
+      | "hello"
+      | "telemetry"
+      | "lastSeenAt"
+    >
   >
 ): Promise<Device | undefined> {
   const [row] = await db

@@ -7,6 +7,7 @@
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --files empty.jpg,empty.jpg,person.jpg --no-loop
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --webcam [--camera C922] [--size 1280x720]
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --url wss://…/agent/devices/ws     (asks for camera and mic)
+//   npm run device-sim -- --server https://… --pair ABCDE-FGHJK                 (pairs first, see below)
 //
 // Devices (macOS, ffmpeg avfoundation): run in a terminal with no frame source
 // and no --speak/--mic, and it asks which camera and microphone to use (either
@@ -24,8 +25,11 @@
 // scene); --no-loop, to stop sending change frames after the last one (capture
 // requests still get it). A capture request with a region gets that region of
 // the current frame, cropped (the rover renders it from the full sensor frame).
-// The token comes from DEVICE_TOKEN, so it stays out of the shell history;
-// register a device with POST /agent/devices to get one.
+// The token comes from DEVICE_TOKEN, so it stays out of the shell history, or
+// from --token-file (default ~/.config/agent-device-sim/token). To get one,
+// add the device on Settings → Devices and pass its pairing code: --server
+// https://… --pair CODE trades it for the token, saves it to the token file
+// and connects to that server; later runs need only --server.
 //
 // Voice mode (plan 4.11), with or without a frame source:
 //   --speak a.wav,b.wav   streams each file as one stretch of speech, in real
@@ -38,9 +42,9 @@
 //                         (use headphones), so the reply doesn't hear itself.
 // Speech chunks play back to back with afplay; stop_speech drops the queue.
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { parseArgs } from "node:util";
 import sharp from "sharp";
@@ -65,6 +69,9 @@ const { values: args } = parseArgs({
     "mic-device": { type: "string" },
     "full-duplex": { type: "boolean", default: false },
     "list-devices": { type: "boolean", default: false },
+    server: { type: "string" },
+    pair: { type: "string" },
+    "token-file": { type: "string", default: join(homedir(), ".config", "agent-device-sim", "token") },
   },
 });
 
@@ -152,8 +159,28 @@ if (args["list-devices"]) {
   process.exit(0);
 }
 
-const token = process.env.DEVICE_TOKEN;
-if (!token) fail("Set DEVICE_TOKEN to the token from POST /agent/devices.");
+// --server sets the link's URL; --pair trades a pairing code for the token first.
+if (args.server) {
+  const server = args.server.replace(/\/+$/, "");
+  if (args.pair) {
+    const res = await fetch(`${server}/agent/devices/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: args.pair }),
+    });
+    if (!res.ok) fail(`Pairing failed (HTTP ${res.status}): ${await res.text()}`);
+    const paired = (await res.json()) as { token: string; device: { name: string } };
+    await mkdir(dirname(args["token-file"]!), { recursive: true, mode: 0o700 });
+    await writeFile(args["token-file"]!, paired.token + "\n", { mode: 0o600 });
+    console.log(`Paired as ${paired.device.name}; token saved to ${args["token-file"]}`);
+  }
+  args.url = server.replace(/^http/, "ws") + "/agent/devices/ws";
+} else if (args.pair) {
+  fail("--pair needs --server, the agent server's address (https://…).");
+}
+const token =
+  process.env.DEVICE_TOKEN ?? (await readFile(args["token-file"]!, "utf8").then((t) => t.trim(), () => undefined));
+if (!token) fail("Pair the device (--server https://… --pair CODE) or set DEVICE_TOKEN.");
 
 // Which camera and microphone: given by name or index, asked for in a terminal, or macOS's defaults.
 const interactive = process.stdin.isTTY && process.stdout.isTTY;
@@ -296,7 +323,12 @@ function connect(source: Source): void {
     socket.send(JSON.stringify({
       type: "hello",
       version: "device-sim/1",
-      capabilities: { sizes: [args.webcam ? args.size : "as-is"], audio: ["wav", "mp3", "aiff"] },
+      // A camera only with a frame source, a microphone only in voice mode.
+      capabilities: {
+        ...(frameSources > 0 && { sizes: [args.webcam ? args.size : "as-is"] }),
+        audio: ["wav", "mp3", "aiff"],
+        ...(voice && { microphone: ["pcm_s16le"] }),
+      },
     }));
     sendTelemetry();
   });

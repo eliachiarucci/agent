@@ -296,32 +296,28 @@ describe("perception settings", () => {
       enabled: true,
       provider: null,
       model: null,
-      route: null,
       framesPerHour: 300,
     });
     const patch = deviceSettingsPatchSchema.parse({
       perception: {
         provider: "openrouter",
-        model: "anthropic/claude-haiku-5.5",
-        route: { only: ["google-vertex/europe"], allowFallbacks: false },
+        model: "anthropic/claude-haiku-5.5@google-vertex/europe",
       },
     });
     const merged = mergeDeviceSettings(DEFAULT_DEVICE_SETTINGS, patch);
-    expect(merged.perception).toMatchObject({ provider: "openrouter", framesPerHour: 300 });
+    expect(merged.perception).toMatchObject({
+      provider: "openrouter",
+      model: "anthropic/claude-haiku-5.5@google-vertex/europe",
+      framesPerHour: 300,
+    });
+    // The old separate route isn't accepted any more.
+    expect(deviceSettingsPatchSchema.safeParse({ perception: { route: null } }).success).toBe(false);
     expect(deviceSettingsPatchSchema.safeParse({ perception: { provider: "acme" } }).success).toBe(false);
   });
 
-  it("pin an OpenRouter route without fallbacks and turn reasoning off", () => {
-    expect(
-      perceptionProviderOptions("openrouter", "anthropic/claude-haiku-5.5", {
-        only: ["google-vertex/europe"],
-        allowFallbacks: false,
-      })
-    ).toEqual({
-      openrouter: {
-        reasoning: { enabled: false },
-        provider: { only: ["google-vertex/europe"], allow_fallbacks: false },
-      },
+  it("turn reasoning off, for a model with a pinned endpoint too", () => {
+    expect(perceptionProviderOptions("openrouter", "anthropic/claude-haiku-5.5@google-vertex/europe")).toEqual({
+      openrouter: { reasoning: { enabled: false } },
     });
     expect(perceptionProviderOptions("openrouter", "google/gemini-3.1-flash-lite")).toEqual({
       openrouter: { reasoning: { effort: "minimal" } },

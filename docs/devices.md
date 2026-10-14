@@ -10,7 +10,8 @@ rover repo (`rover2/docs/vision-agent-plan.md`).
 
 - **`devices`**: owner, the agent the device works for (`agent_id`, `NULL` if that agent was deleted; see "Agent
   runs" for the agent registration creates), name, the
-  token's SHA-256, settings (JSONB), the last `hello` and `telemetry`, `last_seen_at`.
+  token's SHA-256, a pending pairing code's SHA-256 and expiry (see "Pairing"), settings (JSONB), the last `hello`
+  and `telemetry`, `last_seen_at`.
 - **`device_observations`**: one row per frame: `seq`, `trigger` (`change` / `heartbeat` / `request`),
   `request_id`, `captured_at` (device clock), `received_at` (server clock), size, and `frame`, the file name on
   disk (`NULL` once retention removed the image). Then the caption: `caption_status`, `caption` (JSON),
@@ -42,12 +43,11 @@ as a `config` message.
 | `retention.frameDays` | 7 | Frame images |
 | `retention.observationDays` | 90 | Observation rows and device events; frames never outlive their row |
 | `perception.enabled` | `true` | Off: frames are stored, never captioned |
-| `perception.provider`, `perception.model` | `null` | The captioning model, from the owner's providers. `null` provider → the owner's default model; `null` model → the provider's default |
-| `perception.route` | `null` | OpenRouter only: `{ only: ["google-vertex/europe"], allowFallbacks: false }` pins the endpoints that may serve the call |
+| `perception.provider`, `perception.model` | `null` | The captioning model, from the owner's providers. `null` provider → the owner's default model; `null` model → the provider's default. An OpenRouter model can pin the provider that serves it: `anthropic/claude-haiku-5.5@google-vertex/europe` (no fallbacks; see "OpenRouter endpoints") |
 | `perception.framesPerHour` | 300 | Model calls per rolling hour (captioned + failed) |
 | `timezone` | `null` | IANA zone for quiet hours and the times shown to the agent; `null` → the server's |
 | `agent.enabled` | `true` | Off: captions never wake the agent |
-| `agent.provider`, `agent.model`, `agent.route` | `null` | The run's model, resolved like perception's (default: the owner's default model); `route` pins OpenRouter endpoints, since the frame goes to this model too |
+| `agent.provider`, `agent.model` | `null` | The run's model, resolved like perception's (default: the owner's default model). It also runs the device conversation's compaction, and its memory extraction when the agent has no memory model of its own |
 | `agent.salience` | 0.6 | A caption at or above it wakes the agent |
 | `agent.minGapSec` | 20 | Runs start at least this far apart; triggers in between merge into the next run |
 | `agent.reflectionMin` | 30 | A run that sums up the period, if anything was logged; 0 = off |
@@ -61,10 +61,25 @@ as a `config` message.
 | `speech.maxPerHour` | 20 | Agent utterances per rolling hour |
 | `speech.quietHours` | 22:00–08:00 | Local, may cross midnight; `null` = never quiet |
 | `voice.enabled` | `true` | Off: the device's audio is ignored |
-| `voice.provider`, `voice.model`, `voice.route` | `null` | The voice turn's model; `null` provider → the agent run's model and route |
+| `voice.provider`, `voice.model` | `null` | The voice turn's model; `null` provider → the agent run's model |
 | `voice.languageHints` | `["en", "it"]` | Languages the speech-to-text expects (others are still detected) |
 | `voice.endOfTurnMs` | 300 | Silence after the device's last speech segment before the turn is finalised |
 | `voice.closeAfterSec` | 45 | The speech-to-text connection closes after this long without speech |
+| `tools.disabled` | `[]` | Device tools switched off: any of `speak`, `zoom`, `takePicture`, `searchObservations`. They leave the runs' and voice turns' tool sets, and the rules stop mentioning them |
+
+Settings saved before plan rev 17 had a separate `route` (`{ only, allowFallbacks }`) on each model; reading them
+moves its first endpoint into the model id (`readDeviceSettings`), and PATCH no longer takes it.
+
+### OpenRouter endpoints
+
+Any model choice in the app (default model, the chat's, an agent's memory model, a job's, a device job's) can pin
+the OpenRouter endpoint that serves it by appending `@<tag>` to the model id, e.g.
+`anthropic/claude-haiku-5.5@google-vertex/europe`; the pickers offer the tags from
+`GET /agent/provider-endpoints?provider=openrouter&model=` (OpenRouter's `/models/<id>/endpoints`, through the
+account's API endpoint, so the EU one lists only EU endpoints). `chatModelFromSettings` and
+`buildPerceptionModel` send the bare id with `provider: { only: [tag], allow_fallbacks: false }`, so every call made
+with the model (compaction and titles included) stays on that endpoint or fails. The account-wide OpenRouter
+settings are only the API endpoint (`region`: global / `eu.openrouter.ai`) and `zdr`.
 
 ## Link
 
@@ -84,7 +99,7 @@ Control messages are JSON text. Binary messages are `[u32 big-endian header leng
 
 | Direction | Message | Content |
 |---|---|---|
-| device → server | `hello` | `version`, `capabilities: { sizes?, audio? }` |
+| device → server | `hello` | `version`, `capabilities: { sizes?, audio?, microphone? }`: a camera (the sizes it renders), a speaker (formats it plays), a microphone (formats it streams). Settings → Devices shows the jobs and tools that fit |
 | device → server | `telemetry` | `cpuTempC?`, `wifiRssiDbm?`, `uptimeS?` |
 | device → server | `frame` (binary) | header `{ type: "frame", seq, capturedAt (epoch ms), trigger, requestId? }`; JPEG payload |
 | device → server | `played` | `speechId`, `ok`, `durationMs?`, `error?`: sent when a `speech` message finished playing |
@@ -102,8 +117,10 @@ reconnect after these, and should reconnect with backoff after anything else.
 
 | Method | Route | Who | Purpose |
 |---|---|---|---|
-| GET / POST / PATCH / DELETE | `/agent/devices` | session (owner for changes) | List, register (`{ name, description?, agent_id?, memory_pool_id?, timezone? }` → `{ device, agent, token }`), rename / describe / move / settings, delete. `description` (≤ 1000 characters; `null` or `""` clears it) is what the device is and what it's for, for agents to read |
+| GET / POST / PATCH / DELETE | `/agent/devices` | session (owner for changes) | List, register (`{ name, description?, agent_id?, memory_pool_id?, timezone? }` → `{ device, agent, token, pairing: { code, expiresAt } }`), rename / describe / move / settings, delete. `description` (≤ 1000 characters; `null` or `""` clears it) is what the device is and what it's for, for agents to read |
 | POST | `/agent/devices/token` | owner | Rotate the token (`{ id }` → `{ token }`) |
+| POST / DELETE | `/agent/devices/pairing` | owner | A new pairing code (`{ id }` → `{ code, expiresAt }`; an earlier one stops working), or withdraw it (`?id=`) |
+| POST | `/agent/devices/pair` | the code | `{ code }` → `{ token, device: { id, name }, ws }`: the device trades the code for a new token (the old one and its link are cut off) |
 | GET | `/agent/devices/status?id=` | viewer | Online, last seen, hello, telemetry, newest observation and caption, `perception` (model, budget, calls in the last hour) |
 | GET | `/agent/devices/observations?device_id=&from=&to=&before=&min_salience=&q=&limit=` | viewer | Timeline, newest first, up to 200 per page. With `q`: semantic search, best match first, each with `relevance` |
 | GET | `/agent/devices/frame?id=` | viewer | One observation's JPEG |
@@ -213,10 +230,22 @@ spoken in the last hour, the last utterance).
 `lib/devices/retention.ts` runs at startup and hourly: frames older than `frameDays` are deleted and their rows keep
 `frame = NULL`; rows and events older than `observationDays` are deleted. Deleting a device removes its folder.
 
+## Pairing
+
+Settings → Devices (the UI) adds a device and shows a one-time pairing code (`XXXXX-XXXXX`, 31 symbols without
+look-alikes, ≈ 50 bits, 30 minutes, `lib/devices/tokens.ts`). On the device, its pairing command posts the code to
+`/agent/devices/pair`, which returns the device's token and the link's path; the token never appears on screen or in
+a shell history. Case, spaces and dashes in the code don't matter; it works once (cleared in the same update that
+sets the token). "Pair again" makes a new code; the device's current token works until it is used. Clients: the
+rover service (`sudo rover-agent pair <server> <code>`, rover repo `radxa_software/rover-agent`) and the simulator
+(`--server <url> --pair <code>`).
+
 ## Simulator
 
 ```sh
-# Register a device (Settings UI later); keep the token from the response.
+# Add the device on Settings → Devices and pair it; the token is saved to ~/.config/agent-device-sim/token
+npm run device-sim -- --server http://localhost:3001 --pair ABCDE-FGHJK --webcam
+npm run device-sim -- --server http://localhost:3001 --mic          # later runs: the saved token
 DEVICE_TOKEN=dev_… npm run device-sim -- --dir <folder of JPEGs> [--match 2576x1449] [--interval 2]
 DEVICE_TOKEN=dev_… npm run device-sim -- --files empty.jpg,empty.jpg,person.jpg --no-loop --interval 5   # a scripted scene
 DEVICE_TOKEN=dev_… npm run device-sim -- --webcam [--camera 0] [--size 1280x720]   # macOS, needs ffmpeg

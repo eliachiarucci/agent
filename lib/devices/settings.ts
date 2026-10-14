@@ -30,23 +30,15 @@ const retentionSchema = z.object({
   observationDays: z.number().int().min(1).max(3650),
 });
 
-const routeSchema = z
-  .object({
-    only: z.array(z.string().min(1).max(100)).min(1).max(8),
-    allowFallbacks: z.boolean(),
-  })
-  .nullable();
-
 const perceptionSchema = z.object({
   // Off: frames are stored but never captioned.
   enabled: z.boolean(),
   // The captioning model, resolved against the owner's provider settings. NULL
   // provider → the owner's default model; NULL model → the provider's default.
   provider: z.enum(PROVIDER_TYPES).nullable(),
+  // OpenRouter: "model@endpoint" pins the endpoint that serves it, e.g.
+  // "anthropic/claude-haiku-5.5@google-vertex/europe" (plan D20).
   model: z.string().min(1).max(200).nullable(),
-  // OpenRouter only: the endpoints allowed to serve the call, e.g.
-  // ["google-vertex/europe"] (plan D20).
-  route: routeSchema,
   // Captions per rolling hour. Over it, frames are stored but not captioned.
   framesPerHour: z.number().int().min(0).max(3600),
 });
@@ -55,10 +47,9 @@ const agentSchema = z.object({
   // Off: captions are stored, but the agent never runs on them.
   enabled: z.boolean(),
   // The run's model, like perception's: NULL provider → the owner's default
-  // model. `route` pins OpenRouter endpoints (the frame goes to this model too).
+  // model (the frame goes to this model too).
   provider: z.enum(PROVIDER_TYPES).nullable(),
   model: z.string().min(1).max(200).nullable(),
-  route: routeSchema,
   // A caption at or above this salience starts a run (besides wake = "agent"
   // and a new person or animal).
   salience: z.number().min(0).max(1),
@@ -99,16 +90,24 @@ const speechSchema = z.object({
 const voiceSchema = z.object({
   enabled: z.boolean(),
   // The voice turn's model, like the agent's: NULL provider → the agent run's
-  // model (and route). Reasoning is off and the prompt cached either way.
+  // model. Reasoning is off and the prompt cached either way.
   provider: z.enum(PROVIDER_TYPES).nullable(),
   model: z.string().min(1).max(200).nullable(),
-  route: routeSchema,
   // Languages Soniox should expect (it still detects others).
   languageHints: z.array(z.string().min(2).max(10)).max(10),
   // Silence after the device's last speech before the turn is finalised.
   endOfTurnMs: z.number().int().min(200).max(5000),
   // The Soniox connection closes after this long without speech (billing is by connection time).
   closeAfterSec: z.number().int().min(10).max(600),
+});
+
+// The device's own tools in its agent's runs and voice turns; its owner can
+// switch each off (memory, notes, dates are the agent's and always there).
+export const DEVICE_TOOLS = ["speak", "zoom", "takePicture", "searchObservations"] as const;
+export type DeviceTool = (typeof DEVICE_TOOLS)[number];
+
+const toolsSchema = z.object({
+  disabled: z.array(z.enum(DEVICE_TOOLS)).max(DEVICE_TOOLS.length),
 });
 
 export function isTimeZone(value: string): boolean {
@@ -131,6 +130,7 @@ export const deviceSettingsSchema = z.object({
   agent: agentSchema,
   speech: speechSchema,
   voice: voiceSchema,
+  tools: toolsSchema,
 });
 export type DeviceSettings = z.infer<typeof deviceSettingsSchema>;
 
@@ -147,12 +147,11 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
   },
   retention: { frameDays: 7, observationDays: 90 },
   // 300 an hour is ≈ $0.27 an hour at most with Claude Haiku 5.5 at 2576×1449 (P0 bench).
-  perception: { enabled: true, provider: null, model: null, route: null, framesPerHour: 300 },
+  perception: { enabled: true, provider: null, model: null, framesPerHour: 300 },
   agent: {
     enabled: true,
     provider: null,
     model: null,
-    route: null,
     salience: 0.6,
     minGapSec: 20,
     reflectionMin: 30,
@@ -173,12 +172,12 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
     enabled: true,
     provider: null,
     model: null,
-    route: null,
     languageHints: ["en", "it"],
     // Until Smart Turn decides (plan 4.11): 300 ms after the device's VAD ends a segment.
     endOfTurnMs: 300,
     closeAfterSec: 45,
   },
+  tools: { disabled: [] },
 };
 
 // What PATCH /agent/devices accepts: any subset, section by section.
@@ -191,6 +190,7 @@ export const deviceSettingsPatchSchema = z.strictObject({
   agent: agentSchema.partial().strict().optional(),
   speech: speechSchema.partial().strict().optional(),
   voice: voiceSchema.partial().strict().optional(),
+  tools: toolsSchema.partial().strict().optional(),
 });
 export type DeviceSettingsPatch = z.infer<typeof deviceSettingsPatchSchema>;
 
@@ -204,12 +204,33 @@ export function mergeDeviceSettings(base: DeviceSettings, patch: DeviceSettingsP
     agent: { ...base.agent, ...patch.agent },
     speech: { ...base.speech, ...patch.speech },
     voice: { ...base.voice, ...patch.voice },
+    tools: { ...base.tools, ...patch.tools },
   };
+}
+
+type ModelSlot = { provider?: string | null; model?: string | null; route?: { only?: unknown } | null };
+
+// Settings saved before plan rev 17 pinned OpenRouter endpoints in a separate
+// `route`; its first endpoint now goes into the model id.
+function withRouteInModel<T extends ModelSlot>(slot: T | undefined): Omit<T, "route"> | undefined {
+  if (!slot || !("route" in slot)) return slot;
+  const { route, ...rest } = slot;
+  const endpoint = Array.isArray(route?.only) && typeof route.only[0] === "string" ? route.only[0] : null;
+  if (endpoint && rest.provider === "openrouter" && rest.model && !rest.model.includes("@")) {
+    return { ...rest, model: `${rest.model}@${endpoint}` };
+  }
+  return rest;
 }
 
 /** Stored settings over the current defaults; an invalid stored value falls back to the defaults. */
 export function readDeviceSettings(stored: unknown): DeviceSettings {
-  const value = (stored && typeof stored === "object" ? stored : {}) as Partial<DeviceSettings>;
+  const raw = (stored && typeof stored === "object" ? stored : {}) as Partial<DeviceSettings>;
+  const value = {
+    ...raw,
+    perception: withRouteInModel(raw.perception),
+    agent: withRouteInModel(raw.agent),
+    voice: withRouteInModel(raw.voice),
+  };
   const merged = {
     paused: value.paused ?? DEFAULT_DEVICE_SETTINGS.paused,
     timezone: value.timezone ?? DEFAULT_DEVICE_SETTINGS.timezone,
@@ -219,6 +240,7 @@ export function readDeviceSettings(stored: unknown): DeviceSettings {
     agent: { ...DEFAULT_DEVICE_SETTINGS.agent, ...value.agent },
     speech: { ...DEFAULT_DEVICE_SETTINGS.speech, ...value.speech },
     voice: { ...DEFAULT_DEVICE_SETTINGS.voice, ...value.voice },
+    tools: { ...DEFAULT_DEVICE_SETTINGS.tools, ...value.tools },
   };
   const parsed = deviceSettingsSchema.safeParse(merged);
   return parsed.success ? parsed.data : DEFAULT_DEVICE_SETTINGS;

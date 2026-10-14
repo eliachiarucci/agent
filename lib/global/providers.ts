@@ -46,9 +46,6 @@ export const providerSchemas = {
     model: z.string().min(1).optional(),
     // eu.openrouter.ai keeps OpenRouter's processing in the EU (Business plan).
     region: z.enum(["global", "eu"]).optional(),
-    // Endpoint tags allowed to serve requests, e.g. "google-vertex/europe"
-    // (openrouter.ai/<model>/providers). Empty or missing: any.
-    allowedProviders: z.array(z.string().trim().min(1).max(100)).max(30).optional(),
     // Only endpoints with zero data retention.
     zdr: z.boolean().optional(),
   }),
@@ -312,27 +309,77 @@ export function openRouterBaseUrl(settings: { region?: "global" | "eu" }): strin
   return settings.region === "eu" ? OPENROUTER_EU_BASE_URL : OPENROUTER_BASE_URL;
 }
 
+// An OpenRouter model can name the endpoint that serves it: the model id, "@",
+// and the endpoint's tag, e.g. "anthropic/claude-haiku-5.5@google-vertex/europe"
+// (tags from /models/<id>/endpoints). OpenRouter model ids never contain "@".
+const ENDPOINT_SEPARATOR = "@";
+
+export function splitOpenRouterModel(id: string): { model: string; endpoint: string | null } {
+  const at = id.indexOf(ENDPOINT_SEPARATOR);
+  if (at < 0) return { model: id, endpoint: null };
+  return { model: id.slice(0, at), endpoint: id.slice(at + 1) || null };
+}
+
 /**
- * The account's OpenRouter routing on one request body: a request's own pin (a
- * device's route) is kept, narrowed to the allowed providers; without one, the
- * allowed providers are the pin. Fallbacks are off whenever endpoints are
- * pinned, so a request fails rather than leave them. ZDR is added when set.
+ * OpenRouter routing on one request body: the model's endpoint, pinned without
+ * fallbacks (the request fails rather than go elsewhere), and the account's
+ * zero data retention.
  */
 export function applyOpenRouterRouting(
   body: Record<string, any>,
-  settings: { allowedProviders?: string[]; zdr?: boolean }
+  settings: { zdr?: boolean },
+  endpoint: string | null
 ): Record<string, any> {
-  const allowed = (settings.allowedProviders ?? []).filter(Boolean);
-  if (allowed.length === 0 && !settings.zdr) return body;
+  if (!endpoint && !settings.zdr) return body;
   const provider: Record<string, any> = { ...(body.provider ?? {}) };
-  if (allowed.length > 0) {
-    const own: string[] | undefined = provider.only;
-    const narrowed = own?.filter((p) => allowed.includes(p));
-    provider.only = narrowed?.length ? narrowed : allowed;
+  if (endpoint) {
+    provider.only = [endpoint];
     provider.allow_fallbacks = false;
   }
   if (settings.zdr) provider.zdr = true;
   return { ...body, provider };
+}
+
+export type OpenRouterEndpoint = {
+  // What a model id carries after "@", e.g. "google-vertex/europe".
+  tag: string;
+  // The company serving it, e.g. "Google".
+  provider: string;
+  contextLength: number | null;
+  // USD per million tokens.
+  promptPrice: number | null;
+  completionPrice: number | null;
+  // OpenRouter's health: 0 is up, negative is degraded or down.
+  status: number | null;
+};
+
+/**
+ * The endpoints that can serve a model, through the account's API endpoint
+ * (the EU endpoint lists only the EU ones). null when OpenRouter doesn't know the model.
+ */
+export async function listOpenRouterEndpoints(
+  settings: OpenRouterSettings,
+  modelId: string
+): Promise<OpenRouterEndpoint[] | null> {
+  const { model } = splitOpenRouterModel(modelId);
+  const res = await fetch(`${openRouterBaseUrl(settings)}/models/${model}/endpoints`, {
+    headers: { authorization: `Bearer ${settings.apiKey}` },
+    signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`OpenRouter API responded with HTTP ${res.status}.`);
+  const body = (await res.json()) as { data?: { endpoints?: Array<Record<string, any>> } };
+  const perMillion = (v: unknown) => (typeof v === "string" && v !== "" ? Number(v) * 1e6 : null);
+  return (body.data?.endpoints ?? [])
+    .filter((e) => typeof e.tag === "string")
+    .map((e) => ({
+      tag: e.tag,
+      provider: typeof e.provider_name === "string" ? e.provider_name : e.tag,
+      contextLength: typeof e.context_length === "number" ? e.context_length : null,
+      promptPrice: perMillion(e.pricing?.prompt),
+      completionPrice: perMillion(e.pricing?.completion),
+      status: typeof e.status === "number" ? e.status : null,
+    }));
 }
 
 async function testOpenRouter(settings: OpenRouterSettings): Promise<ProviderTestResult> {

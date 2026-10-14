@@ -69,7 +69,7 @@ export type VoiceTurnMetadata = { voiceTurn: { at: string; speakers: string[] } 
 /** The turn's model: the voice setting, else the agent run's. */
 function voiceModelSettings(settings: DeviceSettings): DeviceSettings["agent"] {
   const v = settings.voice;
-  return v.provider ? { ...settings.agent, provider: v.provider, model: v.model, route: v.route } : settings.agent;
+  return v.provider ? { ...settings.agent, provider: v.provider, model: v.model } : settings.agent;
 }
 
 /** Turn handler for voiceSessions: one turn at a time per device, ahead of agent runs. */
@@ -191,6 +191,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       memorySystemPrompt,
       deviceName: device.name,
       description: deviceDescription(device),
+      disabledTools: settings.tools.disabled,
     });
     // No speak tool: the reply itself is spoken.
     const pictures = new TakenPictures();
@@ -302,6 +303,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
         label: `${device.name} conversation`,
         source: "device",
         defaultPrompt: DEVICE_MEMORY_EXTRACTION_PROMPT,
+        fallbackModel: runModel.target,
       }).catch((error) => console.warn(`[memory] voice extraction failed: ${error}`));
     }
 

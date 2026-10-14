@@ -162,6 +162,13 @@
       "when": 1791926432929,
       "tag": "0022_far_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791984965550,
+      "tag": "0023_heavy_molten_man",
+      "breakpoints": true
     }
   ]
 }

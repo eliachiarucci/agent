@@ -29,17 +29,16 @@ describe("prompt caching", () => {
     expect(promptCacheProviderOptions(undefined, undefined)).toBeUndefined();
   });
 
-  it("merges a device run's options: no reasoning, the route and the cache", () => {
-    const route = { only: ["google-vertex/europe"], allowFallbacks: false };
+  it("merges a device run's options: no reasoning and the cache, for a pinned model too", () => {
+    const model = "anthropic/claude-haiku-5.5@google-vertex/europe";
     expect(
       mergeProviderOptions(
-        perceptionProviderOptions("openrouter", "anthropic/claude-haiku-5.5", route),
-        promptCacheProviderOptions("openrouter", "anthropic/claude-haiku-5.5")
+        perceptionProviderOptions("openrouter", model),
+        promptCacheProviderOptions("openrouter", model)
       )
     ).toEqual({
       openrouter: {
         reasoning: { enabled: false },
-        provider: { only: ["google-vertex/europe"], allow_fallbacks: false },
         cache_control: { type: "ephemeral" },
       },
     });

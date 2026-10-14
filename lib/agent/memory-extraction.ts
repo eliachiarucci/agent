@@ -48,24 +48,25 @@ function isMachineTextPart(text: string): boolean {
 
 // The agent's configured memory model, resolved against the owner's provider
 // settings exactly like a chat request (mirrors cron's resolveJobModel). Falls
-// back to the owner's default model when unset — or when the provider has been
-// deconfigured since it was chosen, so extraction keeps working. The model is
-// null when the owner has no default model either (extraction is skipped).
-// Returns the target too for the context-window lookup that drives
+// back to `fallback` (a device's own model, so its conversation stays on that
+// model and endpoint) or else the owner's default model when unset — or when the
+// provider has been deconfigured since it was chosen, so extraction keeps
+// working. The model is null when there is no model at all (extraction is
+// skipped). Returns the target too for the context-window lookup that drives
 // auto-compaction of the running log.
 async function resolveMemoryModel(
-  agent: Agent
+  agent: Agent,
+  fallback?: ContextTarget
 ): Promise<{ model: Awaited<ReturnType<typeof resolveDefaultChatModelAndTarget>>["model"]; target?: ContextTarget }> {
-  if (!agent.memoryProvider) {
+  const otherwise = async () => {
+    if (fallback) return { model: chatModelFromSettings(fallback.provider, fallback.settings, fallback.model), target: fallback };
     const { model, target } = await resolveDefaultChatModelAndTarget(agent.ownerId);
     return { model, target: target ?? undefined };
-  }
+  };
+  if (!agent.memoryProvider) return otherwise();
   const setting = await getProviderSetting(agent.ownerId, agent.memoryProvider);
   const modelId = agent.memoryModel ?? setting?.settings.model;
-  if (!setting || !modelId) {
-    const { model, target } = await resolveDefaultChatModelAndTarget(agent.ownerId);
-    return { model, target: target ?? undefined };
-  }
+  if (!setting || !modelId) return otherwise();
   return {
     model: chatModelFromSettings(agent.memoryProvider, setting.settings, modelId),
     target: { provider: agent.memoryProvider, settings: setting.settings, model: modelId },
@@ -93,6 +94,8 @@ type ExtractionParams = {
   source?: MemorySource;
   // Used when the agent has no extraction prompt of its own.
   defaultPrompt?: string;
+  // Used when the agent has no memory model of its own (device runs: the device's model).
+  fallbackModel?: ContextTarget;
 };
 
 // Serialize extractions per source conversation. Each call read-modify-writes
@@ -160,7 +163,7 @@ async function extractTurn(params: ExtractionParams): Promise<void> {
   const prior = (await getMemoryConversation(conversationId))?.messages ?? [];
   const history: ModelMessage[] = [...prior, { role: "user", content: exchange }];
 
-  const { model: memoryModel, target: memoryTarget } = await resolveMemoryModel(agent);
+  const { model: memoryModel, target: memoryTarget } = await resolveMemoryModel(agent, params.fallbackModel);
   // No model configured anywhere — nothing to extract with; skip this turn.
   if (!memoryModel) return;
   const result = await generateText({

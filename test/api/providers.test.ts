@@ -262,3 +262,18 @@ describe("provider settings", () => {
     expect((await alice.get("/agent/providers")).body).toHaveLength(0);
   });
 });
+
+describe("OpenRouter endpoints", () => {
+  it("checks the model id and needs OpenRouter configured", async () => {
+    const anon = new TestClient(BASE);
+    expect((await anon.get("/agent/provider-endpoints?provider=openrouter&model=a/b")).status).toBe(401);
+
+    const client = new TestClient(BASE);
+    await signUp(client, "Pat");
+    expect((await client.get("/agent/provider-endpoints?provider=anthropic&model=a/b")).status).toBe(400);
+    // The id ends up in OpenRouter's URL, so nothing that could leave the model's path.
+    expect((await client.get("/agent/provider-endpoints?provider=openrouter&model=../key")).status).toBe(400);
+    expect((await client.get("/agent/provider-endpoints?provider=openrouter&model=a/b?x=1")).status).toBe(400);
+    expect((await client.get("/agent/provider-endpoints?provider=openrouter&model=a/b@google-vertex/europe")).status).toBe(404);
+  });
+});

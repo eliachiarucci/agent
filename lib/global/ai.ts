@@ -9,7 +9,7 @@ import { streamText } from "ai";
 // model would re-download on every recreation. Deployments point this at a
 // mounted volume.
 if (process.env.TRANSFORMERS_CACHE) transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE;
-import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, applyOpenRouterRouting, lmstudioBaseUrl, openRouterBaseUrl } from "./providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, applyOpenRouterRouting, lmstudioBaseUrl, openRouterBaseUrl, splitOpenRouterModel } from "./providers";
 import type { ProviderSettingsValue, ProviderType } from "./schema";
 
 export const lmstudio = createOpenAI({
@@ -75,15 +75,17 @@ export function chatModelFromSettings(
         }).chatModel(modelId);
     }
     // OpenRouter is an OpenAI-compatible aggregator — same setup as DeepInfra.
+    // A "model@endpoint" id pins the endpoint on every request made with the
+    // model (compaction and titles included), with the account's ZDR.
     if (provider === "openrouter") {
+        const { model, endpoint } = splitOpenRouterModel(modelId);
         return createOpenAICompatible({
             name: "openrouter",
             baseURL: openRouterBaseUrl(settings),
             apiKey: settings.apiKey,
             includeUsage: true,
-            // The account's routing (endpoint pin, ZDR) on every request.
-            transformRequestBody: (body) => applyOpenRouterRouting(body, settings),
-        }).chatModel(modelId);
+            transformRequestBody: (body) => applyOpenRouterRouting(body, settings, endpoint),
+        }).chatModel(model);
     }
     // Same openai-compatible setup as the default provider (reasoning_content
     // parsing + streamed usage), pointed at the user's LM Studio URL.

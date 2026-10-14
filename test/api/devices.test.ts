@@ -146,6 +146,12 @@ describe("/agent/devices", () => {
 
     expect((await client.patch("/agent/devices", { id: device.id, settings: { cadence: { fov: 170 } } })).status).toBe(400);
     expect((await client.patch("/agent/devices", { id: device.id, settings: { bogus: 1 } })).status).toBe(400);
+
+    // Tools switched off, by name.
+    expect(updated.body.settings.tools).toEqual({ disabled: [] });
+    const tools = await client.patch("/agent/devices", { id: device.id, settings: { tools: { disabled: ["speak", "zoom"] } } });
+    expect(tools.body.settings.tools).toEqual({ disabled: ["speak", "zoom"] });
+    expect((await client.patch("/agent/devices", { id: device.id, settings: { tools: { disabled: ["rm"] } } })).status).toBe(400);
   });
 
   it("stores the owner's description, changes and clears it", async () => {
@@ -318,6 +324,40 @@ describe("device link", () => {
 
     const fresh = await connect(rotated.body.token);
     expect(await fresh.next("config")).toMatchObject({ type: "config" });
+  });
+
+  it("pairs a device with its one-time code, which replaces the token", async () => {
+    const { client } = await userWithAgent("Alice");
+    const created = await client.post("/agent/devices", { name: "Rover" });
+    const { code, expiresAt } = created.body.pairing;
+    expect(code).toMatch(/^[2-9A-HJKMNP-Z]{5}-[2-9A-HJKMNP-Z]{5}$/);
+    expect(new Date(expiresAt).getTime()).toBeGreaterThan(Date.now() + 25 * 60_000);
+    expect(JSON.stringify((await client.get("/agent/devices")).body)).not.toContain(code);
+    const link = await connect(created.body.token);
+    await link.next("config");
+
+    // No session needed; case, spaces and dashes don't matter.
+    const device = new TestClient(BASE);
+    expect((await device.post("/agent/devices/pair", { code: "ABCDE-FGHJK" })).status).toBe(404);
+    const paired = await device.post("/agent/devices/pair", { code: ` ${code.toLowerCase().replace("-", " ")} ` });
+    expect(paired.status).toBe(200);
+    expect(paired.body).toMatchObject({ device: { id: created.body.device.id, name: "Rover" }, ws: "/agent/devices/ws" });
+    expect(paired.body.token).toMatch(/^dev_/);
+    // The old token and its live link are cut off; the code works once.
+    expect(await link.closed).toMatchObject({ code: 4001 });
+    expect(await refusedWith(WS_URL, { authorization: `Bearer ${created.body.token}` })).toBe(401);
+    expect((await device.post("/agent/devices/pair", { code })).status).toBe(404);
+    expect(await (await connect(paired.body.token)).next("config")).toMatchObject({ type: "config" });
+
+    // A new code for the owner only; the previous one stops working, and it can be withdrawn.
+    const first = await client.post("/agent/devices/pairing", { id: created.body.device.id });
+    const second = await client.post("/agent/devices/pairing", { id: created.body.device.id });
+    expect(second.body.code).not.toBe(first.body.code);
+    expect((await device.post("/agent/devices/pair", { code: first.body.code })).status).toBe(404);
+    expect((await client.delete(`/agent/devices/pairing?id=${created.body.device.id}`)).status).toBe(204);
+    expect((await device.post("/agent/devices/pair", { code: second.body.code })).status).toBe(404);
+    const { client: other } = await userWithAgent("Mallory");
+    expect((await other.post("/agent/devices/pairing", { id: created.body.device.id })).status).toBe(404);
   });
 
   it("deleting a device closes its link and removes its data", async () => {

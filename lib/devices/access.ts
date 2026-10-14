@@ -40,6 +40,6 @@ export async function resolveDeviceAccess(
 
 /** The API shape of a device: never the token hash. */
 export function publicDevice(device: Device, role: DeviceRole) {
-  const { tokenHash: _tokenHash, settings, ...rest } = device;
+  const { tokenHash: _tokenHash, pairingCodeHash: _pairingCodeHash, settings, ...rest } = device;
   return { ...rest, settings: readDeviceSettings(settings), role, ...deviceLinkStatus(device.id) };
 }

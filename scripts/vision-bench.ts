@@ -99,18 +99,15 @@ async function resolveModel(spec: string) {
     spec,
     provider: type,
     modelId,
-    model: buildPerceptionModel(type, settings, modelId),
-    providerOptions: providerOptions(type, modelId, endpoint),
+    // The endpoint pin travels in the model id, as in the device settings.
+    model: buildPerceptionModel(type, settings, endpoint ? `${modelId}@${endpoint}` : modelId),
+    providerOptions: providerOptions(type, modelId),
   };
 }
 
 // The worker's options, plus the bench's own Gemini media-resolution switch.
-function providerOptions(type: ProviderType, modelId: string, endpoint?: string) {
-  const options = perceptionProviderOptions(
-    type,
-    modelId,
-    endpoint ? { only: [endpoint], allowFallbacks: false } : null
-  );
+function providerOptions(type: ProviderType, modelId: string) {
+  const options = perceptionProviderOptions(type, modelId);
   const media = args["gemini-media"];
   if (type !== "google" || !media) return options;
   return { google: { ...options?.google, mediaResolution: `MEDIA_RESOLUTION_${media.toUpperCase()}` } };

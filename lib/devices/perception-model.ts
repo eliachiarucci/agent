@@ -7,6 +7,7 @@ import {
   applyOpenRouterRouting,
   lmstudioBaseUrl,
   openRouterBaseUrl,
+  splitOpenRouterModel,
 } from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 import { getProviderSetting } from "../db/provider-settings";
@@ -26,8 +27,6 @@ export type PerceptionTarget = {
   providerOptions?: ProviderOptions;
 };
 
-export type OpenRouterRoute = { only: string[]; allowFallbacks: boolean };
-
 // The OpenAI-compatible providers send the caption's JSON schema only when the
 // model is built with supportsStructuredOutputs (plan D19); chatModelFromSettings
 // doesn't set it (chat needs no schema), so these are built here, otherwise the
@@ -46,6 +45,8 @@ export function buildPerceptionModel(
 ): LanguageModel {
   const baseURL = COMPATIBLE_BASE_URLS[provider]?.(settings);
   if (!baseURL) return chatModelFromSettings(provider, settings, modelId);
+  // A "model@endpoint" id pins OpenRouter's endpoint, as in chatModelFromSettings.
+  const { model, endpoint } = provider === "openrouter" ? splitOpenRouterModel(modelId) : { model: modelId, endpoint: null };
   return createOpenAICompatible({
     name: provider,
     baseURL,
@@ -53,19 +54,14 @@ export function buildPerceptionModel(
     includeUsage: true,
     supportsStructuredOutputs: true,
     ...(provider === "openrouter" && {
-      transformRequestBody: (body: Record<string, any>) => applyOpenRouterRouting(body, settings),
+      transformRequestBody: (body: Record<string, any>) => applyOpenRouterRouting(body, settings, endpoint),
     }),
-  }).chatModel(modelId);
+  }).chatModel(model);
 }
 
 // Captions and device runs want no reasoning: it adds latency and output tokens
 // for no gain (P0: 0 reasoning tokens with these settings on every model tried).
-// An OpenRouter route pins the endpoints that may serve the call (plan D20).
-export function perceptionProviderOptions(
-  provider: ProviderType,
-  modelId: string,
-  route?: OpenRouterRoute | null
-): ProviderOptions | undefined {
+export function perceptionProviderOptions(provider: ProviderType, modelId: string): ProviderOptions | undefined {
   if (provider === "openai" && /^gpt-[56]/.test(modelId)) {
     // @ai-sdk/openai 3.0.68 doesn't recognise gpt-6 ids as reasoning models;
     // forceReasoning gets it the developer role and reasoning_effort.
@@ -80,7 +76,6 @@ export function perceptionProviderOptions(
     if (/gemini-3/.test(modelId)) options.reasoning = { effort: "minimal" };
     else if (/^anthropic\//.test(modelId)) options.reasoning = { enabled: false };
     else if (/gpt-[56]|gemma|qwen/.test(modelId)) options.reasoning = { effort: "none" };
-    if (route) options.provider = { only: route.only, allow_fallbacks: route.allowFallbacks };
     return Object.keys(options).length ? { openrouter: options } : undefined;
   }
   if (provider === "google" && /gemini-3/.test(modelId)) {
@@ -101,12 +96,10 @@ export async function resolvePerceptionTarget(
   }
   target ??= await resolveDefaultModelTarget(ownerId);
   if (!target) return null;
-  // The route belongs to the configured provider; a fallback to the default model doesn't inherit it.
-  const route = target.provider === perception.provider ? perception.route : null;
   return {
     provider: target.provider,
     modelId: target.model,
     model: buildPerceptionModel(target.provider, target.settings, target.model),
-    providerOptions: perceptionProviderOptions(target.provider, target.model, route),
+    providerOptions: perceptionProviderOptions(target.provider, target.model),
   };
 }

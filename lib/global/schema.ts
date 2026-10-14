@@ -303,10 +303,9 @@ export type ProviderSettingsValue = {
   // Default chat model id for this provider, picked from its /models listing.
   model?: string;
   // OpenRouter only (lib/global/providers.ts, applyOpenRouterRouting): the API
-  // endpoint (eu.openrouter.ai needs a Business plan), the endpoints allowed to
-  // serve requests, and zero data retention. They apply to every request.
+  // endpoint (eu.openrouter.ai needs a Business plan) and zero data retention,
+  // on every request. The endpoint serving a model is part of the model id.
   region?: "global" | "eu";
-  allowedProviders?: string[];
   zdr?: boolean;
 };
 
@@ -655,6 +654,10 @@ export const devices = pgTable(
     description: text("description"),
     tokenHash: text("token_hash").notNull(),
     tokenCreatedAt: timestamp("token_created_at").notNull().defaultNow(),
+    // A one-time pairing code (lib/devices/tokens.ts) the device trades for a
+    // new token (POST /agent/devices/pair), so the token never shows on screen.
+    pairingCodeHash: text("pairing_code_hash"),
+    pairingExpiresAt: timestamp("pairing_expires_at"),
     settings: jsonb("settings").notNull().$type<DeviceSettings>(),
     // Last `hello` (service version, capabilities) and `telemetry` the device sent.
     hello: jsonb("hello").$type<DeviceHello>(),
@@ -665,6 +668,7 @@ export const devices = pgTable(
   },
   (t) => [
     uniqueIndex("devices_token_hash_idx").on(t.tokenHash),
+    uniqueIndex("devices_pairing_code_hash_idx").on(t.pairingCodeHash),
     index("devices_owner_idx").on(t.ownerId),
     index("devices_agent_idx").on(t.agentId),
   ]
