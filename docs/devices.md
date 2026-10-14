@@ -230,20 +230,42 @@ spoken in the last hour, the last utterance).
 `lib/devices/retention.ts` runs at startup and hourly: frames older than `frameDays` are deleted and their rows keep
 `frame = NULL`; rows and events older than `observationDays` are deleted. Deleting a device removes its folder.
 
-## Pairing
+## Setting a device up
 
-Settings → Devices (the UI) adds a device and shows a one-time pairing code (`XXXXX-XXXXX`, 31 symbols without
-look-alikes, ≈ 50 bits, 30 minutes, `lib/devices/tokens.ts`). On the device, its pairing command posts the code to
-`/agent/devices/pair`, which returns the device's token and the link's path; the token never appears on screen or in
-a shell history. Case, spaces and dashes in the code don't matter; it works once (cleared in the same update that
-sets the token). "Pair again" makes a new code; the device's current token works until it is used. Clients: the
-rover service (`sudo rover-agent pair <server> <code>`, rover repo `radxa_software/rover-agent`) and the simulator
-(`--server <url> --pair <code>`).
+Settings → Devices (the UI) adds a device and shows one command with a one-time pairing code (`XXXXX-XXXXX`, 31
+symbols without look-alikes, ≈ 50 bits, 30 minutes, `lib/devices/tokens.ts`):
+
+```sh
+curl -fsSL https://agent.example.com/agent/devices/install.sh | sh -s -- ABCDE-FGHJK
+```
+
+`GET /agent/devices/install.sh` (public; `lib/devices/install-script.ts`) is a POSIX sh script with this server's
+address (`APP_ORIGIN`) filled in. Run as the user the device should run as (not root; it uses sudo where needed), it:
+
+1. installs ffmpeg (Homebrew on macOS; `apt-get install ffmpeg alsa-utils` on Linux) if missing;
+2. downloads **agent-device** for the platform from the latest `eliachiarucci/agent-cli` release (checksum
+   verified) into `/usr/local/bin`. It's the device client, built from the simulator and released with the CLI:
+   camera, microphone and speaker through ffmpeg, afplay / aplay (Apple Silicon Macs, 64-bit Linux; USB webcams);
+3. runs `agent-device setup` (pick the camera, microphone, speaker, and whether the speaker is headphones; without
+   a terminal, the defaults that exist);
+4. pairs, last, so a failed install doesn't use the code: `POST /agent/devices/pair` with the code returns the
+   device's token and the link's path, saved to `~/.config/agent-device/device.json` (mode 600) as
+   `{ server, url, token, deviceId }`;
+5. starts it: `agent-device service install` (systemd, at boot, as that user, groups video and audio; exit 3 on
+   the "don't reconnect" close codes, which systemd doesn't restart) on Linux; in the terminal on macOS, whose
+   camera and microphone permission background processes don't get.
+
+`--pair-only` skips 1–3 and 5: it only writes `device.json`, for other device software (the rover's service reads
+it). `--server URL` pairs with another address of this server. The token never appears on screen or in a shell
+history; the code works once (cleared in the same update that sets the token), and case, spaces and dashes in it
+don't matter. "Pair again" makes a new code; the device's current token works until the new code is used, then
+its link is closed with 4001.
 
 ## Simulator
 
 ```sh
-# Add the device on Settings → Devices and pair it; the token is saved to ~/.config/agent-device-sim/token
+# For a real device use agent-device (above). The simulator is for development: scripted scenes, folders of
+# frames, recorded speech. Add a device on Settings → Devices and pair it; the token goes to ~/.config/agent-device-sim/token
 npm run device-sim -- --server http://localhost:3001 --pair ABCDE-FGHJK --webcam
 npm run device-sim -- --server http://localhost:3001 --mic          # later runs: the saved token
 DEVICE_TOKEN=dev_… npm run device-sim -- --dir <folder of JPEGs> [--match 2576x1449] [--interval 2]
