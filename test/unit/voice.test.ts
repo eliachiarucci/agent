@@ -19,6 +19,7 @@ vi.mock("../../lib/agent/context", () => ({
 }));
 import { executeVoiceTurn, heardNotes, type VoiceTurnDeps } from "../../lib/agent/voice-turn";
 import { latestDeviceConversation } from "../../lib/db/conversations";
+import { createDeviceTrigger } from "../../lib/db/device-triggers";
 import { createDevice, listDeviceEvents } from "../../lib/db/devices";
 import { withDeviceLock } from "../../lib/devices/lock";
 import { writeFrame } from "../../lib/devices/frames";
@@ -30,7 +31,7 @@ import { generateDeviceToken } from "../../lib/devices/tokens";
 import { BARGE_IN_MS, VoiceSession, linesFromTokens, voiceSessions, type HeardTurn } from "../../lib/devices/voice/session";
 import { NoSttKeyError, SonioxStream, openStt, sonioxKey, type SttStream, type SttToken } from "../../lib/devices/voice/stt";
 import { upsertProviderSetting } from "../../lib/db/provider-settings";
-import { SentenceSplitter, SilenceGate, heardBlock, speakable } from "../../lib/devices/voice/text";
+import { SentenceSplitter, SilenceGate, SpokenReply, heardBlock, speakable } from "../../lib/devices/voice/text";
 import { closeDb, makeUserWithAgent, resetDb } from "../helpers/db";
 import { silentWav } from "../helpers/fake-piper";
 
@@ -73,6 +74,48 @@ describe("voice text", () => {
     const empty = new SilenceGate();
     empty.finish();
     expect(empty.state).toBe("silent");
+  });
+
+  it("hold each step's first sentence, and drop it when a tool call follows (narration)", () => {
+    // Narration, a tool call, then the answer: only the answer is spoken and kept.
+    const r = new SpokenReply();
+    expect(r.push("I'll check your emails. ")).toEqual([]);
+    r.toolCall();
+    r.endStep();
+    expect(r.push("You have two new emails. One is ")).toEqual([]);
+    expect(r.push("from Marco. ")).toEqual(["You have two new emails.", "One is from Marco."]);
+    expect(r.finish()).toEqual([]);
+    expect(r.text).toBe("You have two new emails. One is from Marco.");
+    expect([...r.dropped]).toEqual([0]);
+    expect(r.silent).toBe(false);
+
+    // Narration, then <silent/>: nothing was said, so the turn is silent.
+    const s2 = new SpokenReply();
+    s2.push("Let me look. ");
+    s2.toolCall();
+    s2.endStep();
+    s2.push("<silent/>");
+    expect(s2.finish()).toEqual([]);
+    expect(s2.silent).toBe(true);
+
+    // A one-sentence answer is spoken at the end of the reply.
+    const one = new SpokenReply();
+    expect(one.push("It's nine.")).toEqual([]);
+    expect(one.finish()).toEqual(["It's nine."]);
+    expect(one.silent).toBe(false);
+
+    // Two sentences before a tool call were already said: kept.
+    const said = new SpokenReply();
+    expect(said.push("Sure, one moment please. Taking a picture now. ")).toEqual([
+      "Sure, one moment please.",
+      "Taking a picture now.",
+    ]);
+    said.toolCall();
+    said.endStep();
+    said.push("A mouse.");
+    expect(said.finish()).toEqual(["A mouse."]);
+    expect(said.text).toBe("Sure, one moment please. Taking a picture now. A mouse.");
+    expect([...said.dropped]).toEqual([]);
   });
 
   it("speak only words, and format what was heard", () => {
@@ -561,6 +604,127 @@ describe("voice turn", () => {
     const earlier = third.findIndex((m) => m.role === "tool");
     expect(third[earlier + 1].content.find((p: any) => p.type === "file")?.mediaType).toBe("image/jpeg");
     expect(third[earlier + 1].content[0].text).toMatch(/^\[picture from Dino's camera, \d\d:\d\d:\d\d\]$/);
+  });
+
+  it("not speak, show again or keep the sentence before a tool call", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    const prompts: any[] = [];
+    const usage = {
+      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 5, text: 5, reasoning: 0 },
+    };
+    const text = (delta: string) => [
+      { type: "text-start" as const, id: "t" },
+      { type: "text-delta" as const, id: "t", delta },
+      { type: "text-end" as const, id: "t" },
+    ];
+    const model = new MockLanguageModelV3({
+      provider: "mock",
+      modelId: "mock-voice",
+      doStream: async (options) => {
+        prompts.push(options.prompt);
+        const chunks =
+          prompts.length === 1
+            ? [
+                { type: "stream-start" as const, warnings: [] },
+                ...text("I'll check the time for you."),
+                { type: "tool-call" as const, toolCallId: "call-1", toolName: "getDate", input: '{"date":"today"}' },
+                { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage },
+              ]
+            : [
+                { type: "stream-start" as const, warnings: [] },
+                ...text("It's Wednesday."),
+                { type: "finish" as const, finishReason: { unified: "stop" as const, raw: "stop" }, usage },
+              ];
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 1 }) };
+      },
+    });
+    const { d } = deps(model, sent);
+    expect(await executeVoiceTurn(device.id, turn("Dino, what day is it?"), d)).toBe("spoken");
+    expect(sent).toEqual([String(400 + "It's Wednesday.".length)]);
+    // The second step doesn't see the narration.
+    const assistant = (prompts[1] as any[]).filter((m) => m.role === "assistant").at(-1);
+    expect(assistant.content.map((p: any) => p.type)).toEqual(["tool-call"]);
+    const conversation = await latestDeviceConversation(device.id);
+    const parts = (conversation!.messages as UIMessage[]).at(-1)!.parts;
+    expect(parts.filter((p) => p.type === "text").map((p: any) => p.text)).toEqual(["It's Wednesday."]);
+    expect(parts.some((p) => p.type === "tool-getDate")).toBe(true);
+  });
+
+  it("try once more for an answer when it called a tool and then went <silent/>", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    let streams = 0;
+    const usage = {
+      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 5, text: 5, reasoning: 0 },
+    };
+    const text = (delta: string) => [
+      { type: "text-start" as const, id: "t" },
+      { type: "text-delta" as const, id: "t", delta },
+      { type: "text-end" as const, id: "t" },
+    ];
+    const model = new MockLanguageModelV3({
+      provider: "mock",
+      modelId: "mock-voice",
+      doStream: async () => {
+        const chunks =
+          streams++ === 0
+            ? [
+                { type: "stream-start" as const, warnings: [] },
+                { type: "tool-call" as const, toolCallId: "call-1", toolName: "getDate", input: '{"date":"today"}' },
+                { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage },
+              ]
+            : [
+                { type: "stream-start" as const, warnings: [] },
+                ...text("<silent/>"),
+                { type: "finish" as const, finishReason: { unified: "stop" as const, raw: "stop" }, usage },
+              ];
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 1 }) };
+      },
+      doGenerate: async () => ({
+        content: [{ type: "text" as const, text: "It's Wednesday the 14th." }],
+        finishReason: { unified: "stop" as const, raw: "stop" },
+        usage,
+        warnings: [],
+      }),
+    });
+    const { d } = deps(model, sent);
+    expect(await executeVoiceTurn(device.id, turn("Dino, what day is it?"), d)).toBe("spoken");
+    expect(sent).toEqual([String(400 + "It's Wednesday the 14th.".length)]);
+    // The retry can't call tools, and doesn't see the <silent/> it replaces.
+    const retry = model.doGenerateCalls[0];
+    expect(retry.toolChoice).toEqual({ type: "none" });
+    expect(retry.prompt.at(-1)?.role).toBe("tool");
+    const conversation = await latestDeviceConversation(device.id);
+    const parts = (conversation!.messages as UIMessage[]).at(-1)!.parts;
+    expect(parts.filter((p) => p.type === "text").map((p: any) => p.text)).toEqual(["It's Wednesday the 14th."]);
+  });
+
+  it("list what the agent set aside with what was heard, and offer the trigger tools", async () => {
+    const device = await makeDevice();
+    await createDeviceTrigger({
+      deviceId: device.id,
+      agentId: device.agentId!,
+      kind: "seen",
+      note: "Elia asked to be told when a mouse is in view.",
+      what: "a computer mouse",
+      expiresAt: new Date(Date.now() + 3600_000),
+      source: "voice",
+    });
+    const sent: string[] = [];
+    const model = streamingModel("Still watching for it.");
+    const { d } = deps(model, sent);
+    expect(await executeVoiceTurn(device.id, turn("Dino, are you still watching?"), d)).toBe("spoken");
+    const user = (model.doStreamCalls[0].prompt as any[]).filter((m) => m.role === "user").at(-1);
+    expect(JSON.stringify(user.content)).toMatch(/<triggers>\\nWhat you set aside .+watch for \\"a computer mouse\\", once/);
+    expect(model.doStreamCalls[0].tools?.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["remindAt", "watchFor", "listTriggers", "cancelTrigger"])
+    );
+    const conversation = await latestDeviceConversation(device.id);
+    const stored = (conversation!.messages as UIMessage[])[0].parts.map((p: any) => p.text.split("\n")[0]);
+    expect(stored).toEqual([expect.stringMatching(/^<heard> /), "<triggers>"]);
   });
 
   it("show a zoomed region to the model itself, not a description of it", async () => {

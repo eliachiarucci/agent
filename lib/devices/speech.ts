@@ -37,6 +37,8 @@ export async function speak(
     text: string;
     language?: string;
     urgent?: boolean;
+    // Asked-for news (a trigger run): no cooldown or hourly cap.
+    requested?: boolean;
     // "agent": a run's speak tool, under the policy; "user": the say route.
     source: "agent" | "user";
     conversationId?: string;
@@ -53,6 +55,7 @@ export async function speak(
     language,
     source,
     urgent: params.urgent ?? false,
+    ...(params.requested && { requested: true }),
     ...(params.conversationId && { conversationId: params.conversationId }),
     ...(params.userId && { userId: params.userId }),
   };
@@ -77,6 +80,7 @@ export async function speak(
       now: deps.now(),
       online,
       urgent: params.urgent ?? false,
+      requested: params.requested,
       lastSpokenAt: spoken[0]?.createdAt ?? null,
       spokenLastHour: spoken.length,
     });

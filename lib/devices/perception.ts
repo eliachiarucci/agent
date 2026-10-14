@@ -10,6 +10,7 @@ import {
   type Device,
   type DeviceObservation,
 } from "../db/devices";
+import { listDeviceTriggers } from "../db/device-triggers";
 import type { CaptionStatus } from "../global/schema";
 import { captionFrame, type Caption, type CaptionResult } from "./caption";
 import { frameFilePath } from "./frames";
@@ -163,9 +164,20 @@ export class PerceptionWorker {
 
     if (queue.previous === undefined) queue.previous = (await latestCaptioned(deviceId))?.caption ?? null;
     const image = await readFile(frameFilePath(deviceId, observation.frame));
+    // The active watches (plan 4.12), as short ids the model can copy back.
+    const now = this.deps.now();
+    const watches = device.agentId
+      ? (await listDeviceTriggers(deviceId, device.agentId)).filter((t) => t.kind === "seen" && t.expiresAt > now)
+      : [];
+    const label = new Map(watches.map((w, i) => [`w${i + 1}`, w.id]));
 
     const started = performance.now();
-    const result: CaptionResult = await this.deps.caption({ target, image, previous: queue.previous });
+    const result: CaptionResult = await this.deps.caption({
+      target,
+      image,
+      previous: queue.previous,
+      watches: watches.map((w, i) => ({ id: `w${i + 1}`, what: w.what ?? "" })),
+    });
     const meta = {
       provider: target.provider,
       model: target.modelId,
@@ -183,6 +195,10 @@ export class PerceptionWorker {
       });
     }
 
+    // Stored with the triggers' own ids.
+    result.caption.watchHits = [
+      ...new Set((result.caption.watchHits ?? []).flatMap((id) => (label.has(id) ? [label.get(id)!] : []))),
+    ];
     queue.previous = result.caption;
     // A failed embedding loses search for this frame, not its caption.
     const embedding = await this.deps.embed(result.caption.summary).catch((error) => {

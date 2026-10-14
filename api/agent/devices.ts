@@ -5,6 +5,8 @@ import { createAgentOnPool, getDefaultAgentForUser, listAgentMembers, type Agent
 import { getMemoryPool } from "../../lib/db/memory-pools";
 import { deviceRunner } from "../../lib/devices/runner";
 import { createDevice, deleteDevice, listDevicesForUser, updateDevice } from "../../lib/db/devices";
+import { deleteOtherAgentsTriggers } from "../../lib/db/device-triggers";
+import { logTrigger } from "../../lib/devices/triggers";
 import { deviceRole, publicDevice, resolveDeviceAccess } from "../../lib/devices/access";
 import { removeDeviceFiles } from "../../lib/devices/frames";
 import { CLOSE_DELETED, disconnectDevice, pushDeviceSettings } from "../../lib/devices/gateway";
@@ -172,6 +174,12 @@ export const PATCH: express.RequestHandler = async (req, res) => {
         return;
     }
     if (merged) pushDeviceSettings(id, merged);
+    // What the old agent set aside ends with it (plan 4.12).
+    if (agent_id !== undefined && agent_id !== access.device.agentId) {
+        for (const trigger of await deleteOtherAgentsTriggers(id, agent_id)) {
+            await logTrigger(id, "cancelled", trigger, { reason: "the device works for another agent now" });
+        }
+    }
     res.json(publicDevice(device, "owner"));
 }
 

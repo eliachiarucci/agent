@@ -739,8 +739,9 @@ export const deviceObservations = pgTable(
 );
 
 // "speech": something the device was asked to say (and whether it played);
-// "run": an agent run, or one skipped (lib/agent/device-run.ts).
-export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error", "speech", "run", "voice"] as const;
+// "run": an agent run, or one skipped (lib/agent/device-run.ts); "trigger": one
+// set, fired, expired or cancelled (lib/devices/triggers.ts).
+export const DEVICE_EVENT_KINDS = ["connected", "disconnected", "error", "speech", "run", "voice", "trigger"] as const;
 export type DeviceEventKind = (typeof DEVICE_EVENT_KINDS)[number];
 
 // Device log: connections, protocol errors, speech and agent runs.
@@ -756,4 +757,42 @@ export const deviceEvents = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [index("device_events_device_created_idx").on(t.deviceId, t.createdAt)]
+);
+
+// Something a device's agent set aside to be woken by (plan 4.12,
+// lib/devices/triggers.ts): a reminder at a time ("at") or a watch for
+// something in view ("seen", checked by the captioner). The note is the
+// agent's message to its future self. Rows go when they fire (once), expire or
+// are cancelled; the "trigger" device events keep the history.
+export const DEVICE_TRIGGER_KINDS = ["at", "seen"] as const;
+export type DeviceTriggerKind = (typeof DEVICE_TRIGGER_KINDS)[number];
+
+export const deviceTriggers = pgTable(
+  "device_triggers",
+  {
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => devices.id, { onDelete: "cascade" }),
+    // The agent that set it; it ends when the device works for another agent.
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<DeviceTriggerKind>().notNull(),
+    note: text("note").notNull(),
+    // "seen": what to look for.
+    what: text("what"),
+    // "at": when.
+    at: timestamp("at"),
+    // "seen": keeps going until it expires, re-armed once the thing is out of view.
+    repeat: boolean("repeat").notNull().default(false),
+    armed: boolean("armed").notNull().default(true),
+    expiresAt: timestamp("expires_at").notNull(),
+    lastFiredAt: timestamp("last_fired_at"),
+    fired: integer("fired").notNull().default(0),
+    // Where it was set: a voice turn or an agent run.
+    source: text("source").$type<"voice" | "run">().notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("device_triggers_device_idx").on(t.deviceId), index("device_triggers_at_idx").on(t.at)]
 );

@@ -1,15 +1,19 @@
-import { generateText, stepCountIs, type ModelMessage, type ToolSet } from "ai";
+import { generateText, stepCountIs, tool, type ModelMessage, type ToolSet } from "ai";
+import { z } from "zod";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { buildGmailTools, gmailPromptFor, gmailApprovalTargetsFor, gmailToolInfo } from "../../lib/agent/connectors/gmail";
 import { filterConnectorTools } from "../../lib/agent/connectors/shared";
-import { SILENT, deviceSystemPrompt } from "../../lib/agent/device-run";
+import { SILENT, deviceContextBlock, deviceSystemPrompt } from "../../lib/agent/device-run";
 import { loadSystemPrompt } from "../../lib/agent/system-prompt";
-import { heardNotes } from "../../lib/agent/voice-turn";
+import { answerAfterTools, heardNotes, withoutNarration } from "../../lib/agent/voice-turn";
 import { perceptionProviderOptions } from "../../lib/devices/perception-model";
 import type { HeardTurn } from "../../lib/devices/voice/session";
 import { heardBlock, type HeardLine } from "../../lib/devices/voice/text";
 import { chatModelFromSettings } from "../../lib/global/ai";
 import { closeDb, makeUserWithAgent } from "../helpers/db";
+import { CONFIRM, buildTriggerTools } from "../../lib/devices/trigger-tools";
+import { DEFAULT_DEVICE_SETTINGS } from "../../lib/devices/settings";
+import type { Device } from "../../lib/db/devices";
 
 // Voice turns against a real model: does the agent answer, or stay <silent/>,
 // in the conversations that went wrong on 2026-10-14 (plan rev 19)? Each
@@ -54,19 +58,33 @@ async function turn(messages: ModelMessage[], tools?: ToolSet) {
     deviceName: "Dino",
     description: "A small rover with a camera, a microphone and a speaker, in Elia's flat.",
     disabledTools: [],
-    connectorsPrompt: tools ? gmailPromptFor(tools) : undefined,
+    connectorsPrompt: tools && "search_threads" in tools ? gmailPromptFor(tools) : undefined,
   });
   const result = await generateText({
     model: chatModelFromSettings("openrouter", { apiKey: KEY, region: "eu" }, MODEL),
     system,
     messages,
     tools,
+    // As in voice turns: text before a tool call is narration, not shown again.
+    prepareStep: ({ messages: all }) => ({ messages: withoutNarration(all, messages.length) }),
     stopWhen: stepCountIs(4),
     providerOptions: perceptionProviderOptions("openrouter", MODEL),
     maxOutputTokens: 400,
   });
+  // As in voice turns: called tools, then <silent/>, gets one more try.
+  let text = result.text.trim();
+  if (tools && text.startsWith(SILENT) && result.steps.length > 1) {
+    text =
+      (await answerAfterTools({
+        model: chatModelFromSettings("openrouter", { apiKey: KEY, region: "eu" }, MODEL),
+        system,
+        messages: withoutNarration([...messages, ...result.response.messages.slice(0, -1)], messages.length),
+        tools,
+        providerOptions: perceptionProviderOptions("openrouter", MODEL),
+      })) ?? text;
+  }
   return {
-    text: result.text.trim(),
+    text,
     calls: result.steps.flatMap((step) => step.toolCalls.map((call) => call.toolName)),
     added: result.response.messages,
   };
@@ -188,6 +206,97 @@ describe.skipIf(!KEY)("voice turns with a real model", () => {
       const done = await turn([ask, ...asked.added, yes], second.tools);
       expect(second.sent, `run ${i + 1} didn't send after the yes`).toHaveBeenCalledTimes(1);
       expect(done.text.startsWith(SILENT)).toBe(false);
+    }
+  });
+
+  // The trigger tools as a device has them, recording their calls instead of storing anything.
+  function triggerTools() {
+    const calls: Array<{ name: string; input: any }> = [];
+    const real = buildTriggerTools({
+      device: { id: "d", name: "Dino", hello: null } as unknown as Device,
+      settings: DEFAULT_DEVICE_SETTINGS,
+      agentId: "a",
+      timeZone: "Europe/Rome",
+      source: "voice",
+      now: () => new Date(),
+    });
+    const tools: ToolSet = Object.fromEntries(
+      Object.entries(real).map(([name, t]) => [
+        name,
+        {
+          ...t,
+          execute: async (input: any) => {
+            calls.push({ name, input });
+            return name === "watchFor"
+              ? { set: `t-${calls.length}: watch for "${input.what}", once, until 17:36. Note: ${input.note}`, note: "Frames are checked when the view changes, up to 300 an hour.", reply: CONFIRM }
+              : { set: `t-${calls.length}: reminder at 16:46. Note: ${input.note}`, reply: CONFIRM };
+          },
+        },
+      ])
+    );
+    return { tools, calls };
+  }
+
+  it("sets a watch when asked to say when something comes into view", async () => {
+    for (let i = 0; i < RUNS; i++) {
+      const { tools, calls } = triggerTools();
+      const result = await turn(
+        [heard([me("Dino, let me know when a computer mouse comes into your view.")])],
+        tools
+      );
+      const watch = calls.find((c) => c.name === "watchFor");
+      expect(watch, `run ${i + 1} made no watch (said: ${result.text})`).toBeDefined();
+      expect(watch!.input.what).toMatch(/mouse/i);
+      expect(result.text.startsWith(SILENT), `run ${i + 1} silent after the watch`).toBe(false);
+    }
+  });
+
+  it("sets a reminder when asked to remind them later", async () => {
+    for (let i = 0; i < RUNS; i++) {
+      const { tools, calls } = triggerTools();
+      const result = await turn([heard([me("Dino, remind me in ten minutes to take the pasta off the stove.")])], tools);
+      const reminder = calls.find((c) => c.name === "remindAt");
+      expect(reminder, `run ${i + 1} set no reminder (said: ${result.text})`).toBeDefined();
+      expect(reminder!.input.in_minutes ?? reminder!.input.at).toBeTruthy();
+      expect(reminder!.input.note).toMatch(/pasta/i);
+    }
+  });
+
+  it("tells them out loud when a watch it set fires, even with nobody in view", async () => {
+    const now = new Date();
+    const report = deviceContextBlock({
+      device: { name: "Dino" } as Device,
+      timeZone: "Europe/Rome",
+      now,
+      triggers: [
+        {
+          kind: "trigger",
+          at: now,
+          detail:
+            'watch for "a computer mouse" seen at 18:31:02 (set 18:02; a one-time watch, now done). Your note: Voice 1 asked at 18:02 to be told when a computer mouse comes into view. Tell them out loud.',
+        },
+      ],
+      since: new Date(now.getTime() - 60_000),
+      captions: [],
+      speech: [],
+      frame: null,
+    });
+    for (let i = 0; i < RUNS; i++) {
+      const said: string[] = [];
+      const tools: ToolSet = {
+        speak: tool({
+          description: "Say something out loud through Dino's speaker.",
+          inputSchema: z.object({ text: z.string() }),
+          execute: async ({ text }) => (said.push(text), { spoken: true }),
+        }),
+      };
+      await turn(
+        [
+          { role: "user", content: `${report.replace("No frame is available.", "The newest frame shows a black computer mouse held up in front of the camera; nobody's face is in view.")}` },
+        ],
+        tools
+      );
+      expect(said.join(" "), `run ${i + 1} didn't speak`).toMatch(/mouse/i);
     }
   });
 });

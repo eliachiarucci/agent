@@ -36,6 +36,9 @@ import { buildObservationTools, deviceDescription } from "../devices/observation
 import { perceptionProviderOptions } from "../devices/perception-model";
 import type { RunTrigger } from "../devices/run-triggers";
 import { deviceTimeZone, readDeviceSettings, type DeviceSettings, type DeviceTool } from "../devices/settings";
+import { buildTriggerTools } from "../devices/trigger-tools";
+import { TRIGGER_RUNS_PER_HOUR, triggersBlock } from "../devices/triggers";
+import { listDeviceTriggers } from "../db/device-triggers";
 import { MAX_SPEECH_CHARS, speak } from "../devices/speech";
 import { localDate, localDayLabel, localTime } from "../devices/time";
 import { applyCompaction, planChatCompaction, usageTokens } from "./compaction";
@@ -123,10 +126,10 @@ function deviceRules(deviceName: string, description: string | null, disabled: r
     "## Device runs",
     `You are the agent of ${deviceName}, a device with a camera, a microphone and a speaker. The messages in this conversation come from it, not from a person typing: ${DEVICE_CONTEXT_OPEN} reports (the time, what woke you, the captions since your last run, what was said recently, and its newest frame) and ${HEARD_OPEN} blocks (what its microphone heard; see "Voice"). Nobody reads your replies to reports as they happen; together they are the device's log.`,
     ...(description ? [`What ${deviceName} is and what it's for, from its owner: ${description}`] : []),
-    "- End with one or two short sentences for the log: what happened, and what you did about it.",
+    `- Your reply to a ${DEVICE_CONTEXT_OPEN} report is one or two short sentences for the log: what happened, and what you did about it. (A reply to a ${HEARD_OPEN} block is spoken instead: no log line there.)`,
     ...(has("speak")
       ? [
-          "- Speak (the speak tool) only when it helps someone who is there. When a person newly appears and nothing was said in the last 10 minutes, greet them in one short sentence. Also warn about something unsafe, and answer someone who talks to the device. Keep it to a sentence or two, and don't repeat what was said recently. When nobody is there, don't speak.",
+          "- Speak (the speak tool) only when it helps someone who is there. When a person newly appears and nothing was said in the last 10 minutes, greet them in one short sentence. Also warn about something unsafe, and answer someone who talks to the device. Keep it to a sentence or two, and don't repeat what was said recently. When nobody is there, don't speak, unless a trigger you set says to tell them.",
           "- If speak refuses (quiet hours, muted, cooldown), accept it; don't retry with other wording.",
         ]
       : ["- You can't speak in these runs (the speak tool is off); the log is all you write."]),
@@ -134,11 +137,14 @@ function deviceRules(deviceName: string, description: string | null, disabled: r
     "- The camera can't tell who someone is. Never name or identify a person in view, not even as one of the people you serve: in the log and when speaking, they are \"a person\", described by what is visible. Don't greet anyone by name.",
     "- Store lasting facts only (the place, routines, animals, the known people you serve), never anything about strangers.",
     ...(looking.length ? [`- Use ${looking.join("; ")}.`] : []),
+    '- When someone asks for something later or when something shows up ("remind me at six", "tell me when the cat comes"), set it aside with remindAt or watchFor, with a note for your future self (who asked, when, what to do): a promise without one is never kept. What you set aside is listed in <triggers>.',
+    `- A run woken by "a trigger you set" does what its note says${has("speak") ? ", out loud even if nobody is in view (they asked)" : " (in the log: you can't speak)"}. For a watch, check the newest frame first.`,
     '- A run woken by "reflection" sums up the period for the log and stores lasting facts; it doesn\'t speak.',
     "",
     "## Voice",
     `A ${HEARD_OPEN} block is what the microphone heard: the time, then one line per stretch of speech, "voice N: words" (N tells voices apart within a conversation; it is not a name) with the language when known. Your reply to it is spoken aloud by ${deviceName}, as it is.`,
     `- Reply exactly ${SILENT} (nothing else) unless someone is talking to you: they say your name ("${deviceName}"), ask you something clearly meant for you, or continue a conversation they are having with you. People talking to each other, a TV or radio, and speech you can't follow get ${SILENT}.`,
+    `- Once you call a tool for someone, they are waiting: answer them with what you found or did, never ${SILENT}.`,
     `- A header that says "in conversation" means you spoke moments ago: the person is most likely answering or going on, even without your name and even if the transcript garbles a word. Answer it; ${SILENT} only when it's plainly not for you (they turned to someone else, a TV).`,
     `- "talking over your reply" means they cut you off to say more: take it together with what they said before (your reply was cut where it shows [interrupted]) and answer the whole of it. Don't repeat what you already said.`,
     `- When you answer: one or two short sentences of plain spoken language (no lists, markdown, emoji or URLs), in the language you were addressed in.${has("speak") ? " Never use the speak tool to answer: your reply is already spoken." : ""}`,
@@ -230,6 +236,7 @@ const TRIGGER_LABELS: Record<RunTrigger["kind"], string> = {
   new_entity: "someone or something new in view",
   look: "a person asked the device to look",
   reflection: "reflection (sum up the period)",
+  trigger: "a trigger you set",
 };
 
 function captionLine(row: DeviceObservation, timeZone: string): string {
@@ -252,6 +259,8 @@ export function deviceContextBlock(params: {
   captions: DeviceObservation[];
   speech: Array<{ at: Date; text: string; status: string }>;
   frame: DeviceObservation | null;
+  // The device triggers the agent set (triggersBlock), if any.
+  setAside?: string | null;
 }): string {
   const { timeZone } = params;
   const shown = params.captions.slice(-MAX_CONTEXT_CAPTIONS);
@@ -274,6 +283,7 @@ export function deviceContextBlock(params: {
     params.frame
       ? `The newest frame (${localTime(params.frame.capturedAt, timeZone, true)}) is attached.`
       : "No frame is available.",
+    ...(params.setAside ? [params.setAside] : []),
     DEVICE_CONTEXT_CLOSE,
   ].join("\n");
 }
@@ -353,6 +363,10 @@ export function buildDeviceTools(params: {
   pictures: TakenPictures;
   // deviceConnectorTools' tools.
   connectorTools?: ToolSet;
+  // Where the tools are used: a voice turn or an agent run (triggers record it).
+  source?: "voice" | "run";
+  // The run was woken by a trigger the agent set: speech it asked for skips the cooldown and hourly cap.
+  requested?: boolean;
 }) {
   const { device, settings, deps, memoryScope, timeZone, pictures } = params;
   const deviceId = device.id;
@@ -390,7 +404,15 @@ export function buildDeviceTools(params: {
           .describe("Skip the cooldown, only for something unsafe that can't wait"),
       }),
       execute: async ({ text, language, urgent }) =>
-        deps.speak({ device, text, language, urgent, source: "agent", conversationId: runConversationId }),
+        deps.speak({
+          device,
+          text,
+          language,
+          urgent,
+          requested: params.requested,
+          source: "agent",
+          conversationId: runConversationId,
+        }),
     }),
     zoom: tool({
       description:
@@ -428,6 +450,14 @@ export function buildDeviceTools(params: {
     ...buildDateTools(timeZone),
     ...buildNoteTools(params.agentId, params.ownerId),
     ...searchTools,
+    ...buildTriggerTools({
+      device,
+      settings,
+      agentId: params.agentId,
+      timeZone,
+      source: params.source ?? "run",
+      now: deps.now,
+    }),
     ...params.connectorTools,
   };
   // The tools the owner switched off for this device.
@@ -471,11 +501,16 @@ async function runLocked(
   };
 
   if (!device.agentId) return record("no_agent");
-  const runsLastHour = await countDeviceEvents(deviceId, "run", new Date(started.getTime() - HOUR_MS), [
-    "done",
-    "failed",
-  ]);
-  if (runsLastHour >= settings.agent.runsPerHour) return record("over_budget");
+  const hourAgo = new Date(started.getTime() - HOUR_MS);
+  const runsLastHour = await countDeviceEvents(deviceId, "run", hourAgo, ["done", "failed"]);
+  // A trigger the agent set is news someone asked for: it skips the budget, up to its own cap.
+  const requested = triggers.some((t) => t.kind === "trigger");
+  if (
+    runsLastHour >= settings.agent.runsPerHour &&
+    !(requested && (await countDeviceEvents(deviceId, "trigger", hourAgo, ["fired"])) <= TRIGGER_RUNS_PER_HOUR)
+  ) {
+    return record("over_budget");
+  }
 
   let conversationId: string | undefined;
   try {
@@ -534,6 +569,7 @@ async function runLocked(
       captions,
       speech: recentSpeech,
       frame,
+      setAside: triggersBlock(await listDeviceTriggers(deviceId, agent.id), timeZone, now),
     });
 
     // The frame is copied into the conversation's uploads: the chat shows it,
@@ -643,6 +679,8 @@ async function runLocked(
       ownerId: owner.id,
       pictures,
       connectorTools: connectors.tools,
+      source: "run",
+      requested,
     });
 
     const modelView = await inlineImageFileParts(

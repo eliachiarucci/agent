@@ -126,7 +126,8 @@ reconnect after these, and should reconnect with backoff after anything else.
 | GET | `/agent/devices/frame?id=` | viewer | One observation's JPEG |
 | POST | `/agent/devices/say` | viewer | `{ id, text ≤ 300, language? }`: speak now. Only needs the device online (not the agent's limits). 409 when nothing played |
 | POST | `/agent/devices/look` | viewer | `{ id, agent = true }`: a fresh frame, captioned ahead of change frames; waits up to 30 s for the caption. Also wakes the agent ("look"). 409 offline, 504 no frame |
-| GET | `/agent/devices/live?id=` | viewer | Server-sent events: `status` (first), `observation` (a frame arrived), `caption` (its caption settled), `speech`, `run`, `deleted` |
+| GET / DELETE | `/agent/devices/triggers?id=` | viewer (owner to delete, `&trigger=`) | What the device's agent set aside (reminders and watches), the soonest first |
+| GET | `/agent/devices/live?id=` | viewer | Server-sent events: `status` (first), `observation` (a frame arrived), `caption` (its caption settled), `speech`, `run`, `voice`, `trigger`, `deleted` |
 
 The status route also reports `agent` (model, runs in the last hour, the last run) and `speech` (muted, provider,
 spoken in the last hour, the last utterance).
@@ -154,7 +155,8 @@ spoken in the last hour, the last utterance).
   of the user's default agent (the Personal Assistant), or on `memory_pool_id`, with the Personal Assistant's
   members. Deleting the device keeps the agent.
 - **Triggers:** a caption with `wake = "agent"`, salience ≥ `agent.salience`, or a new person or animal; a `look`;
-  the reflection timer. Runs start at least `minGapSec` apart, one at a time; triggers in between merge.
+  the reflection timer; a trigger the agent set (below). Runs start at least `minGapSec` apart (a set trigger skips
+  the gap), one at a time; triggers in between merge.
 - **The device's conversation:** one continuous conversation per device (plan D24), owned by the device's owner,
   under the device's agent, shared with its members (`conversations.device_id`), compacted as it grows. Runs and
   voice turns take a per-device lock (`lib/devices/lock.ts`; voice turns first), and share the system prompt and
@@ -173,7 +175,7 @@ spoken in the last hour, the last utterance).
   (`deviceConnectorTools`; off with the device's `connectors` switch). There is no Approve button on a device: an
   `ask` tool's first call doesn't run and tells the model to ask out loud; the same tool for the same targets runs
   when called again in a later voice turn, after the person answered (`lib/agent/connectors/spoken-approval.ts`,
-  in memory, 10 minutes). No scheduling. 6 steps at most.
+  in memory, 10 minutes). The trigger tools (below). 6 steps at most.
 - **Identity:** the camera never identifies anyone. The run's prompt forbids naming people in view, even as one of the
   people the agent serves; names will come only from the face module (plan 4.8).
 - **After the run:** the headless compaction check, and memory extraction with the label "`<device> observation`"
@@ -185,6 +187,30 @@ spoken in the last hour, the last utterance).
   about batteries searched the rover's captions).
 - **Description:** the owner's text about what the device is and what it's for. Chats list it (above), and the
   device's own runs get it under "Device runs".
+
+## Set-aside triggers
+
+`lib/devices/triggers.ts`, `lib/devices/trigger-tools.ts`, `lib/db/device-triggers.ts`; table `device_triggers`.
+Plan 4.12. What the device's agent sets aside to be woken by, from a voice turn or its own run.
+
+- **Kinds:** a reminder at a time (`at`, tool `remindAt`: `in_minutes`, or "HH:MM" / "YYYY-MM-DD HH:MM" in the
+  device's time zone, at least a minute and at most 7 days ahead) and a watch for something in view (`seen`, tool
+  `watchFor`: `what`, `minutes` = 60, `repeat`). `listTriggers` and `cancelTrigger` too. 20 active per device.
+- **The note** is the agent's message to its future self (who asked, when, what to do): when the trigger fires, the
+  conversation may have been compacted, so the run reads the note.
+- **Listed** with each run's `<device-context>` and each voice turn (a `<triggers>` text part, hidden in the chat UI),
+  not in the system prompt, which would break the prompt cache on every change.
+- **Watches:** the perception worker gives the captioner the active watches as short ids (`w1: a computer mouse`); the
+  caption's optional `watchHits` names the ones in view and is stored with the triggers' ids. A hit wakes a run;
+  a one-time watch is removed as it fires; a repeating one is disarmed until a caption without it, and fires at most
+  every 2 minutes. Refused without a camera or with captioning off.
+- **Reminders** fire from a 15 s ticker (`startDeviceRuns`); one that couldn't fire within an hour of its time is
+  dropped. Expired triggers are removed on the same tick.
+- **The run** (trigger kind `trigger`) is woken with the note and what fired, and does what the note says, out loud
+  even if nobody is in view. It skips the hourly run budget (up to 20 trigger runs an hour) and its `speak` skips the
+  cooldown and hourly cap (`requested`); mute and quiet hours still hold, and then the conversation carries it.
+- **Ends** when it fires (once), expires, is cancelled (tool, or the device page), or the device moves to another
+  agent. Each step is a `trigger` device event (`set`, `fired`, `expired`, `cancelled`).
 
 ## Voice mode
 
@@ -207,6 +233,12 @@ spoken in the last hour, the last utterance).
   (`CONVERSATION_WINDOW_MS`; the rules: answer it unless it's plainly not for you), and "talking over your reply".
   Each finished sentence is synthesised (Piper) and sent as its own `speech` clip, so the first audio leaves while
   the model still writes. Markup in a reply (a tool call written as text) is never spoken.
+- **Narration and tools** (`SpokenReply`): text written before a tool call ("I'll check your emails.") is narration.
+  Each step's first sentence is held until a second one completes or the step ends without a tool call; a tool call
+  drops it, and it is taken out of what the model sees next (`withoutNarration`) and of the stored reply. Spoken, it
+  left people hanging when the answer after the tool came out `<silent/>` (2 of 12 email questions). A turn that
+  called tools and still ended `<silent/>` gets one more try at the answer, with tools listed but not callable
+  (`answerAfterTools`). The rules also say to answer once a tool was called for someone.
 - **Barge-in:** 400 ms of new speech while the device answers (the model writing it, or the device playing it)
   stops the model and sends `stop_speech`. If some of it played, the stored reply keeps the sentences that played,
   then "[interrupted]", and the next turn's header says "talking over your reply". If nothing played yet, the person
@@ -293,7 +325,8 @@ answers `played`, and reconnects with backoff (1 → 30 s). For speech, run Pipe
 `PIPER_URL=http://localhost:5050`.
 
 Voice turns against a real model (answer or `<silent/>` in the cases that went wrong: a follow-up moments after a
-reply, a sentence split by a pause, talking over a reply, TV in the room): `OPENROUTER_API_KEY=… npm run test:ai --
+reply, a sentence split by a pause, talking over a reply, TV in the room; reading email, sending one after a spoken
+yes; setting a watch or a reminder; a trigger run speaking): `OPENROUTER_API_KEY=… npm run test:ai --
 test/ai/voice-turns.test.ts`.
 
 Voice: `--speak a.wav,b.wav` streams each file as one stretch of speech in real time (`--interrupt` barges into the

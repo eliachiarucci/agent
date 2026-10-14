@@ -2,15 +2,18 @@ import type { DeviceObservation } from "../db/devices";
 import type { DeviceSettings } from "./settings";
 
 // What wakes a device's agent (plan 4.5). Captions decide most of it; "look"
-// comes from a person pressing Look, "reflection" from the timer.
+// comes from a person pressing Look, "reflection" from the timer, "trigger"
+// from something the agent set aside (a reminder or a watch, plan 4.12).
 
-export const RUN_TRIGGER_KINDS = ["wake", "salience", "new_entity", "look", "reflection"] as const;
+export const RUN_TRIGGER_KINDS = ["wake", "salience", "new_entity", "look", "reflection", "trigger"] as const;
 
 export type RunTrigger = {
   kind: (typeof RUN_TRIGGER_KINDS)[number];
   at: Date;
   detail: string;
   observationId?: string;
+  // kind "trigger": the device trigger that fired.
+  triggerId?: string;
 };
 
 /** The triggers in one caption, if any. */

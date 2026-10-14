@@ -21,6 +21,8 @@ export const captionSchema = z.object({
   salience: z.number().min(0).max(1),
   wake: z.enum(["none", "log", "agent"]),
   reason: z.string(),
+  // Optional, so a model that leaves it out doesn't lose the whole caption.
+  watchHits: z.array(z.string()).optional().describe("The ids of the watches this frame shows; [] if none"),
 });
 export type Caption = z.infer<typeof captionSchema>;
 
@@ -35,6 +37,7 @@ Describe what you see and what changed:
 - salience: 0 for nothing of interest (an empty garden, a change in light), up to 1 for something that needs attention now.
 - wake: "none" if nothing relevant changed; "log" for a change worth a line in the day's log; "agent" when the rover's agent should decide whether to act (someone arrives or speaks to the rover, an animal is in the garden, something unusual or possibly unsafe).
 - reason: one short sentence on why you chose that wake level.
+- watchHits: the message may list watches, things someone asked to be told about ("w1: a computer mouse"). List the id of each one this frame clearly shows, even if it was already there before; [] if none or if there are no watches.
 
 Never say who a person is, even if you think you recognise them: describe people only by what is visible (clothes, posture, what they are doing). Names, when known, come from a separate face-recognition step.
 Describe only what is in the frame; don't guess at what is outside it.`;
@@ -43,13 +46,18 @@ export type CaptionResult =
   | { ok: true; caption: Caption; usage: LanguageModelUsage; responseId?: string }
   | { ok: false; error: string; usage?: LanguageModelUsage; rawText?: string };
 
+// A watch as the captioner sees it: a short id ("w1") and what to look for.
+export type CaptionWatch = { id: string; what: string };
+
 export async function captionFrame(params: {
   target: PerceptionTarget;
   image: Uint8Array;
   previous: Caption | null;
+  // The device's active watches (plan 4.12); the caption's watchHits name the ones in view.
+  watches?: CaptionWatch[];
   timeoutMs?: number;
 }): Promise<CaptionResult> {
-  const { target, image, previous } = params;
+  const { target, image, previous, watches = [] } = params;
   try {
     const result = await generateText({
       model: target.model,
@@ -60,9 +68,12 @@ export async function captionFrame(params: {
           content: [
             {
               type: "text",
-              text: previous
-                ? `Previous description:\n${JSON.stringify(previous)}`
-                : "No previous description: this is the first frame.",
+              text: [
+                previous
+                  ? `Previous description:\n${JSON.stringify({ ...previous, watchHits: undefined })}`
+                  : "No previous description: this is the first frame.",
+                ...(watches.length ? ["Watches:", ...watches.map((w) => `${w.id}: ${w.what}`)] : []),
+              ].join("\n"),
             },
             { type: "image", image, mediaType: "image/jpeg" },
           ],

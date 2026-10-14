@@ -3,10 +3,11 @@ import { countNotableSince, getDevice, listAllDevices, type Device } from "../db
 import { perceptionWorker } from "./perception";
 import { captionTriggers, type RunTrigger } from "./run-triggers";
 import { readDeviceSettings } from "./settings";
+import { TRIGGER_TICK_MS, dueTriggers, watchTriggers } from "./triggers";
 
 // Schedules device agent runs (plan 4.5): one run at a time per device, runs
-// at least minGapSec apart (start to start); triggers that arrive meanwhile
-// merge into the next run. The reflection timer adds a run every
+// at least minGapSec apart (start to start; a trigger the agent set skips the
+// gap); triggers that arrive meanwhile merge into the next run. The reflection timer adds a run every
 // reflectionMin minutes when anything was logged in the period.
 
 export type RunnerDeps = {
@@ -80,7 +81,9 @@ export class DeviceRunner {
 
   private schedule(deviceId: string, state: DeviceState): void {
     if (state.running || state.timer || state.pending.length === 0) return;
-    const wait = state.lastStart + state.minGapMs - this.deps.now();
+    // A trigger the agent set (plan 4.12) is news someone asked for: no gap.
+    const gap = state.pending.some((t) => t.kind === "trigger") ? 0 : state.minGapMs;
+    const wait = state.lastStart + gap - this.deps.now();
     if (wait > 0) {
       state.timer = setTimeout(() => {
         state.timer = null;
@@ -131,19 +134,30 @@ export const deviceRunner = new DeviceRunner({
   countNotable: countNotableSince,
 });
 
-/** Runs a device's agent when its captions call for it. */
+/** Runs a device's agent when its captions call for it, or show something it watches for. */
 export async function onCaptionSettled(deviceId: string, observation: Parameters<typeof captionTriggers>[0]) {
   if (observation.captionStatus !== "captioned") return;
   const device = await getDevice(deviceId);
   if (!device?.agentId) return;
   const { agent } = readDeviceSettings(device.settings);
   if (!agent.enabled) return;
+  // Asked-for news doesn't wait out the gap between runs.
+  deviceRunner.trigger(deviceId, await watchTriggers(device, observation, new Date()), 0);
   deviceRunner.trigger(deviceId, captionTriggers(observation, agent), agent.minGapSec * 1000);
+}
+
+/** Starts the runs of reminders whose time has come (and drops expired triggers). */
+export async function fireDueTriggers(now = new Date()): Promise<void> {
+  for (const { deviceId, trigger } of await dueTriggers(now)) {
+    const device = await getDevice(deviceId);
+    if (!device || !readDeviceSettings(device.settings).agent.enabled) continue;
+    deviceRunner.trigger(deviceId, [trigger], 0);
+  }
 }
 
 const REFLECTION_TICK_MS = 60_000;
 
-/** Wires captions to runs and starts the reflection timer (index.ts). */
+/** Wires captions to runs and starts the reflection and trigger timers (index.ts). */
 export function startDeviceRuns(): () => void {
   const unsubscribe = perceptionWorker.onSettled((deviceId, observation) => {
     onCaptionSettled(deviceId, observation).catch((error) => console.error("Run trigger failed:", error));
@@ -151,8 +165,12 @@ export function startDeviceRuns(): () => void {
   const timer = setInterval(() => {
     deviceRunner.reflect().catch((error) => console.error("Reflection tick failed:", error));
   }, REFLECTION_TICK_MS);
+  const triggers = setInterval(() => {
+    fireDueTriggers().catch((error) => console.error("Trigger tick failed:", error));
+  }, TRIGGER_TICK_MS);
   return () => {
     unsubscribe();
     clearInterval(timer);
+    clearInterval(triggers);
   };
 }

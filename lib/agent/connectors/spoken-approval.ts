@@ -43,5 +43,5 @@ export function spokenApprovalFor(
 export const SPOKEN_APPROVAL_NEEDED = {
   done: false,
   needsApproval:
-    "Not done yet: this needs a yes out loud. Say what you are about to do and ask whether to go ahead. If they say yes, call this tool again with the same input.",
+    "Not done yet: this needs a yes out loud. Ask them now, in your reply: say what you are about to do and whether to go ahead. If they say yes, call this tool again with the same input.",
 };

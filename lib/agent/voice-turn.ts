@@ -1,9 +1,13 @@
 import {
   convertToModelMessages,
   extractReasoningMiddleware,
+  generateText,
   stepCountIs,
   streamText,
   wrapLanguageModel,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
   type UIMessage,
 } from "ai";
 import { getAgent, listAgentMembers } from "../db/agents";
@@ -18,7 +22,7 @@ import { inQuietHours } from "../devices/speech-policy";
 import { localDayLabel, localTime } from "../devices/time";
 import { resolveVoice, synthesize } from "../devices/tts";
 import { CONVERSATION_WINDOW_MS, voiceSessions, type HeardTurn } from "../devices/voice/session";
-import { SentenceSplitter, SilenceGate, heardBlock, speakable } from "../devices/voice/text";
+import { SpokenReply, heardBlock, speakable } from "../devices/voice/text";
 import { applyCompaction, planChatCompaction, usageTokens } from "./compaction";
 import {
   DEVICE_MEMORY_EXTRACTION_PROMPT,
@@ -40,6 +44,8 @@ import { withPromptCache } from "./prompt-cache";
 import { stepsToUIMessageParts } from "./step-ui-messages";
 import { loadSystemPrompt } from "./system-prompt";
 import { deviceDescription } from "../devices/observation-tools";
+import { triggersBlock } from "../devices/triggers";
+import { listDeviceTriggers } from "../db/device-triggers";
 
 // A voice turn (plan 4.11): what the device's microphone heard is appended to
 // the device's conversation as a <heard> message; the agent replies, streamed,
@@ -146,7 +152,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
   const memoryScope = agent.chatMemoryEnabled ? scope : null;
   const heardText = turn.lines.map((l) => l.text).join("\n");
   const turnId = crypto.randomUUID();
-  const [basePrompt, memoriesBlock, memorySystemPrompt, connectors] = await Promise.all([
+  const [basePrompt, memoriesBlock, memorySystemPrompt, connectors, setAside] = await Promise.all([
     loadSystemPrompt(),
     memoryScope ? buildRelevantMemoriesBlock(memoryScope, heardText.slice(-2000)) : null,
     memoryScope
@@ -157,7 +163,9 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
         })
       : "",
     deviceConnectorTools({ settings, ownerId: owner.id, agentId: agent.id, conversationId, turnId, heard: true }),
+    listDeviceTriggers(deviceId, agent.id),
   ]);
+  const setAsideBlock = triggersBlock(setAside, timeZone, deps.now());
 
   const metadata: VoiceTurnMetadata = {
     voiceTurn: { at: turn.at.toISOString(), speakers: [...new Set(turn.lines.map((l) => l.speaker))] },
@@ -166,7 +174,11 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
     id: turnId,
     role: "user",
     metadata,
-    parts: [...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []), { type: "text", text: heard }],
+    parts: [
+      ...(memoriesBlock ? [{ type: "text" as const, text: memoriesBlock }] : []),
+      { type: "text", text: heard },
+      ...(setAsideBlock ? [{ type: "text" as const, text: setAsideBlock }] : []),
+    ],
   });
   if (current) await updateMessage(conversationId, { messages: history });
   else
@@ -227,6 +239,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       ownerId: owner.id,
       pictures,
       connectorTools: connectors.tools,
+      source: "voice",
     });
     const modelView = await inlineImageFileParts(
       windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),
@@ -238,34 +251,41 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       (file) => readConversationFileBytes(conversationId, file, "upload")
     );
     mark("request");
+    const requestMessages = withPromptCache(system, modelMessages, runModel.provider === "anthropic");
+    const model = wrapLanguageModel({
+      model: runModel.model as Parameters<typeof wrapLanguageModel>[0]["model"],
+      middleware: extractReasoningMiddleware({ tagName: "think" }),
+    });
     const result = streamText({
-      model: wrapLanguageModel({
-        model: runModel.model as Parameters<typeof wrapLanguageModel>[0]["model"],
-        middleware: extractReasoningMiddleware({ tagName: "think" }),
-      }),
-      ...withPromptCache(system, modelMessages, runModel.provider === "anthropic"),
+      model,
+      ...requestMessages,
       tools,
-      prepareStep: pictures.prepareStep,
+      // This turn's text before a tool call is narration: the model doesn't see it again.
+      prepareStep: ({ messages }) => ({
+        messages: pictures.insert(withoutNarration(messages, requestMessages.messages.length)),
+      }),
       providerOptions: runModel.providerOptions,
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: abort.signal,
     });
 
-    const gate = new SilenceGate();
-    const splitter = new SentenceSplitter();
+    const reply = new SpokenReply();
     const canSpeak = !muted && !quiet;
-    let replyText = "";
+    const say = (sentences: string[]) => {
+      for (const sentence of sentences) {
+        mark("firstSentence");
+        if (canSpeak && !interrupted) speaker.say(sentence);
+      }
+    };
     try {
       for await (const part of result.fullStream) {
         if (part.type === "text-delta") {
           mark("firstToken");
-          replyText += part.text;
-          const open = gate.push(part.text);
-          if (!open) continue;
-          for (const sentence of splitter.push(open)) {
-            mark("firstSentence");
-            if (canSpeak) speaker.say(sentence);
-          }
+          say(reply.push(part.text));
+        } else if (part.type === "tool-input-start" || part.type === "tool-call") {
+          reply.toolCall();
+        } else if (part.type === "finish-step") {
+          reply.endStep();
         } else if (part.type === "error") {
           throw part.error;
         }
@@ -273,12 +293,25 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
     } catch (error) {
       if (!interrupted) throw error;
     }
-    gate.finish();
-    if (gate.state === "speak") {
-      const rest = splitter.flush();
-      if (rest) {
-        mark("firstSentence");
-        if (canSpeak && !interrupted) speaker.say(rest);
+    say(reply.finish());
+
+    // Called tools, then <silent/>: someone asked, so one more try at the answer.
+    let retried: string | null = null;
+    if (reply.silent && !interrupted && (await result.steps).length > 1) {
+      const response = await result.response;
+      const answered = response.messages.slice(0, -1);
+      retried = await answerAfterTools({
+        model,
+        system: requestMessages.system,
+        messages: pictures.insert(withoutNarration([...requestMessages.messages, ...answered], requestMessages.messages.length)),
+        tools,
+        providerOptions: runModel.providerOptions,
+        abortSignal: abort.signal,
+      }).catch(() => null);
+      if (retried) {
+        const again = new SpokenReply();
+        say(again.push(retried));
+        say(again.finish());
       }
     }
     const played = await speaker.finish();
@@ -290,21 +323,30 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       return record("merged", { conversationId });
     }
 
-    const silent = gate.state === "silent";
+    const silent = reply.silent && !retried;
     const spokenText = played.filter((p) => p.ok).map((p) => p.text).join(" ");
     const storedText = silent
       ? SILENT
       : interrupted
         ? `${spokenText}${spokenText ? " " : ""}[interrupted]`
-        : speakable(replyText);
+        : speakable(retried ?? reply.text);
     let parts: UIMessage["parts"] = [{ type: "text", text: storedText }];
     let usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } = {};
     if (!interrupted) {
       const steps = await result.steps;
       // The history keeps what was said, not stray markup (a "<speak>" in it gets copied by later turns).
-      const stepParts = stepsToUIMessageParts(steps).map((part) =>
+      // Narration before a tool call isn't kept either (later turns would copy it).
+      const kept = steps.map((step, i) =>
+        reply.dropped.has(i) ? { ...step, content: step.content.filter((c) => c.type !== "text") } : step
+      );
+      const stepParts = stepsToUIMessageParts(kept).map((part) =>
         part.type === "text" && !silent ? { ...part, text: speakable(part.text) } : part
       );
+      if (retried) {
+        const last = stepParts.findLastIndex((part) => part.type === "text");
+        if (last >= 0) stepParts[last] = { type: "text", text: speakable(retried), state: "done" };
+        else stepParts.push({ type: "text", text: speakable(retried), state: "done" });
+      }
       if (stepParts.length) parts = stepParts;
       usage = steps.at(-1)?.usage ?? {};
     }
@@ -373,6 +415,34 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
     // Turns are serialised per device, so the reply on the session is this one's.
     if (session) session.reply = null;
   }
+}
+
+/**
+ * One more try at the answer of a turn that called tools and then said
+ * <silent/> (the model now and then decides it has nothing to add, e.g. after
+ * setting a watch whose note says to tell them later). Tools stay listed (the
+ * history calls them) but can't be called. Null if it is silent again.
+ */
+export async function answerAfterTools(params: {
+  model: LanguageModel;
+  system?: string;
+  messages: ModelMessage[];
+  tools: ToolSet;
+  providerOptions?: Parameters<typeof generateText>[0]["providerOptions"];
+  abortSignal?: AbortSignal;
+}): Promise<string | null> {
+  const result = await generateText({ ...params, toolChoice: "none", maxOutputTokens: 400 });
+  const text = result.text.trim();
+  return text && !text.startsWith(SILENT) ? text : null;
+}
+
+/** The messages with the text taken out of this turn's assistant messages that call tools. */
+export function withoutNarration(messages: ModelMessage[], from: number): ModelMessage[] {
+  return messages.map((m, i) =>
+    i >= from && m.role === "assistant" && Array.isArray(m.content) && m.content.some((p) => p.type === "tool-call")
+      ? { ...m, content: m.content.filter((p) => p.type !== "text") }
+      : m
+  );
 }
 
 /** What the <heard> header says about the conversation (the rules explain both). */

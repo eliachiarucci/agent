@@ -11,6 +11,9 @@ export type SpeechPolicyInput = {
   online: boolean;
   // Bypasses the cooldown only.
   urgent: boolean;
+  // News someone asked for (a run woken by a trigger the agent set, plan 4.12):
+  // bypasses the cooldown and the hourly cap; mute and quiet hours still hold.
+  requested?: boolean;
   lastSpokenAt: Date | null;
   spokenLastHour: number;
 };
@@ -55,6 +58,7 @@ export function checkSpeechPolicy(input: SpeechPolicyInput): SpeechPolicyResult 
       reason: `Quiet hours (${speech.quietHours!.start}–${speech.quietHours!.end}): don't speak until they end.`,
     };
   }
+  if (input.requested) return { ok: true };
   if (input.spokenLastHour >= speech.maxPerHour) {
     return { ok: false, reason: `Already spoke ${input.spokenLastHour} times in the last hour (the limit).` };
   }

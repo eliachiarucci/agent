@@ -176,6 +176,13 @@
       "when": 1791990360880,
       "tag": "0024_voice_end_of_turn_700",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791996182769,
+      "tag": "0025_device_triggers",
+      "breakpoints": true
     }
   ]
 }

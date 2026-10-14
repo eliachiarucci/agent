@@ -14,6 +14,8 @@ export type LiveEvent =
   | { type: "speech"; event: DeviceEvent }
   | { type: "run"; event: DeviceEvent }
   | { type: "voice"; event: DeviceEvent }
+  // A trigger was set, fired, expired or was cancelled (plan 4.12).
+  | { type: "trigger"; event: DeviceEvent }
   | { type: "deleted" };
 
 export type PublicObservation = Omit<DeviceObservation, "frame"> & { hasFrame: boolean };

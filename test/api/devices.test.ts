@@ -6,6 +6,7 @@ import { TestClient } from "../helpers/client";
 import { signUp } from "../helpers/auth";
 import { agentMembers, closeDb, db, resetDb } from "../helpers/db";
 import { encodeBinaryMessage } from "../../lib/devices/protocol";
+import { createDeviceTrigger } from "../../lib/db/device-triggers";
 
 const BASE = serverUrl("api");
 const WS_URL = BASE.replace(/^http/, "ws") + "/agent/devices/ws";
@@ -417,6 +418,41 @@ describe("device access", () => {
     const anonymous = new TestClient(BASE);
     expect((await anonymous.get("/agent/devices")).status).toBe(401);
     expect((await anonymous.request(frameUrl)).status).toBe(401);
+  });
+
+  it("lists the agent's triggers to whoever sees the device; only the owner removes one", async () => {
+    const alice = await userWithAgent("Alice");
+    const bob = await userWithAgent("Bob");
+    const { device } = await register(alice.client);
+    const set = (note: string, minutes: number) =>
+      createDeviceTrigger({
+        deviceId: device.id,
+        agentId: device.agentId,
+        kind: "at",
+        note,
+        at: new Date(Date.now() + minutes * 60_000),
+        expiresAt: new Date(Date.now() + (minutes + 60) * 60_000),
+        source: "voice",
+      });
+    const later = await set("Later.", 30);
+    const sooner = await set("Sooner.", 5);
+
+    const listed = await alice.client.get(`/agent/devices/triggers?id=${device.id}`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.map((t: any) => t.note)).toEqual(["Sooner.", "Later."]);
+    expect((await bob.client.get(`/agent/devices/triggers?id=${device.id}`)).status).toBe(404);
+
+    await db.insert(agentMembers).values({ agentId: device.agentId, userId: bob.user.id });
+    expect((await bob.client.get(`/agent/devices/triggers?id=${device.id}`)).body).toHaveLength(2);
+    expect((await bob.client.delete(`/agent/devices/triggers?id=${device.id}&trigger=${sooner.id}`)).status).toBe(403);
+    expect((await alice.client.delete(`/agent/devices/triggers?id=${device.id}&trigger=${sooner.id}`)).status).toBe(204);
+    expect((await alice.client.delete(`/agent/devices/triggers?id=${device.id}&trigger=${sooner.id}`)).status).toBe(404);
+    expect((await alice.client.get(`/agent/devices/triggers?id=${device.id}`)).body.map((t: any) => t.id)).toEqual([later.id]);
+
+    // Moving the device to another agent ends what the old one set aside.
+    const other = (await alice.client.post("/agent/agents", { name: "Second" })).body;
+    expect((await alice.client.patch("/agent/devices", { id: device.id, agent_id: other.id })).status).toBe(200);
+    expect((await alice.client.get(`/agent/devices/triggers?id=${device.id}`)).body).toEqual([]);
   });
 
   it("only registers devices on agents the user belongs to", async () => {
