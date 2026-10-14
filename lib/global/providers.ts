@@ -44,6 +44,13 @@ export const providerSchemas = {
     // An API key from the OpenRouter dashboard (openrouter.ai/keys).
     apiKey: z.string().min(1),
     model: z.string().min(1).optional(),
+    // eu.openrouter.ai keeps OpenRouter's processing in the EU (Business plan).
+    region: z.enum(["global", "eu"]).optional(),
+    // Endpoint tags allowed to serve requests, e.g. "google-vertex/europe"
+    // (openrouter.ai/<model>/providers). Empty or missing: any.
+    allowedProviders: z.array(z.string().trim().min(1).max(100)).max(30).optional(),
+    // Only endpoints with zero data retention.
+    zdr: z.boolean().optional(),
   }),
   openai: z.object({
     // A secret API key (sk-...) from platform.openai.com/api-keys.
@@ -299,13 +306,41 @@ async function parseOpenAIModelIds(res: Response): Promise<string[] | undefined>
 // OpenAI-compatible aggregator; chat (lib/global/ai.ts), the model listing, and
 // the context-window lookup all hang off this base.
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+export const OPENROUTER_EU_BASE_URL = "https://eu.openrouter.ai/api/v1";
+
+export function openRouterBaseUrl(settings: { region?: "global" | "eu" }): string {
+  return settings.region === "eu" ? OPENROUTER_EU_BASE_URL : OPENROUTER_BASE_URL;
+}
+
+/**
+ * The account's OpenRouter routing on one request body: a request's own pin (a
+ * device's route) is kept, narrowed to the allowed providers; without one, the
+ * allowed providers are the pin. Fallbacks are off whenever endpoints are
+ * pinned, so a request fails rather than leave them. ZDR is added when set.
+ */
+export function applyOpenRouterRouting(
+  body: Record<string, any>,
+  settings: { allowedProviders?: string[]; zdr?: boolean }
+): Record<string, any> {
+  const allowed = (settings.allowedProviders ?? []).filter(Boolean);
+  if (allowed.length === 0 && !settings.zdr) return body;
+  const provider: Record<string, any> = { ...(body.provider ?? {}) };
+  if (allowed.length > 0) {
+    const own: string[] | undefined = provider.only;
+    const narrowed = own?.filter((p) => allowed.includes(p));
+    provider.only = narrowed?.length ? narrowed : allowed;
+    provider.allow_fallbacks = false;
+  }
+  if (settings.zdr) provider.zdr = true;
+  return { ...body, provider };
+}
 
 async function testOpenRouter(settings: OpenRouterSettings): Promise<ProviderTestResult> {
   let keyRes: Response;
   try {
     // /models is public and ignores the key, so verify the key against /key
     // (which 401s on a bad token) before listing.
-    keyRes = await fetch(`${OPENROUTER_BASE_URL}/key`, {
+    keyRes = await fetch(`${openRouterBaseUrl(settings)}/key`, {
       headers: { authorization: `Bearer ${settings.apiKey}` },
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     });
@@ -321,7 +356,7 @@ async function testOpenRouter(settings: OpenRouterSettings): Promise<ProviderTes
 
   let modelsRes: Response;
   try {
-    modelsRes = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+    modelsRes = await fetch(`${openRouterBaseUrl(settings)}/models`, {
       signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     });
   } catch {

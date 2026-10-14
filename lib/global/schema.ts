@@ -302,6 +302,12 @@ export type ProviderSettingsValue = {
   apiKey?: string;
   // Default chat model id for this provider, picked from its /models listing.
   model?: string;
+  // OpenRouter only (lib/global/providers.ts, applyOpenRouterRouting): the API
+  // endpoint (eu.openrouter.ai needs a Business plan), the endpoints allowed to
+  // serve requests, and zero data retention. They apply to every request.
+  region?: "global" | "eu";
+  allowedProviders?: string[];
+  zdr?: boolean;
 };
 
 export const providerSettings = pgTable(

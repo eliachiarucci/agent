@@ -9,7 +9,7 @@ import { streamText } from "ai";
 // model would re-download on every recreation. Deployments point this at a
 // mounted volume.
 if (process.env.TRANSFORMERS_CACHE) transformersEnv.cacheDir = process.env.TRANSFORMERS_CACHE;
-import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, OPENROUTER_BASE_URL, lmstudioBaseUrl } from "./providers";
+import { DEEPINFRA_BASE_URL, TENSORX_BASE_URL, applyOpenRouterRouting, lmstudioBaseUrl, openRouterBaseUrl } from "./providers";
 import type { ProviderSettingsValue, ProviderType } from "./schema";
 
 export const lmstudio = createOpenAI({
@@ -78,9 +78,11 @@ export function chatModelFromSettings(
     if (provider === "openrouter") {
         return createOpenAICompatible({
             name: "openrouter",
-            baseURL: OPENROUTER_BASE_URL,
+            baseURL: openRouterBaseUrl(settings),
             apiKey: settings.apiKey,
             includeUsage: true,
+            // The account's routing (endpoint pin, ZDR) on every request.
+            transformRequestBody: (body) => applyOpenRouterRouting(body, settings),
         }).chatModel(modelId);
     }
     // Same openai-compatible setup as the default provider (reasoning_content

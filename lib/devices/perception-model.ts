@@ -1,7 +1,13 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import { chatModelFromSettings } from "../global/ai";
-import { DEEPINFRA_BASE_URL, OPENROUTER_BASE_URL, TENSORX_BASE_URL, lmstudioBaseUrl } from "../global/providers";
+import {
+  DEEPINFRA_BASE_URL,
+  TENSORX_BASE_URL,
+  applyOpenRouterRouting,
+  lmstudioBaseUrl,
+  openRouterBaseUrl,
+} from "../global/providers";
 import type { ProviderSettingsValue, ProviderType } from "../global/schema";
 import { getProviderSetting } from "../db/provider-settings";
 import { resolveDefaultModelTarget } from "../agent/default-model";
@@ -28,7 +34,7 @@ export type OpenRouterRoute = { only: string[]; allowFallbacks: boolean };
 // same way.
 const COMPATIBLE_BASE_URLS: Partial<Record<ProviderType, (s: ProviderSettingsValue) => string>> = {
   lmstudio: (s) => `${lmstudioBaseUrl(s.url ?? "http://localhost:1234")}/v1`,
-  openrouter: () => OPENROUTER_BASE_URL,
+  openrouter: (s) => openRouterBaseUrl(s),
   deepinfra: () => DEEPINFRA_BASE_URL,
   tensorx: () => TENSORX_BASE_URL,
 };
@@ -46,6 +52,9 @@ export function buildPerceptionModel(
     apiKey: settings.apiKey ?? "lm-studio",
     includeUsage: true,
     supportsStructuredOutputs: true,
+    ...(provider === "openrouter" && {
+      transformRequestBody: (body: Record<string, any>) => applyOpenRouterRouting(body, settings),
+    }),
   }).chatModel(modelId);
 }
 
