@@ -173,8 +173,10 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceSettings = {
     provider: null,
     model: null,
     languageHints: ["en", "it"],
-    // Until Smart Turn decides (plan 4.11): 300 ms after the device's VAD ends a segment.
-    endOfTurnMs: 300,
+    // Until Smart Turn decides (plan 4.11): 700 ms after the device's VAD ends a segment.
+    // 300 ms split sentences at a pause (plan rev 19); a reply cut off before it
+    // played is merged into the next turn anyway (lib/devices/voice/session.ts).
+    endOfTurnMs: 700,
     closeAfterSec: 45,
   },
   tools: { disabled: [] },

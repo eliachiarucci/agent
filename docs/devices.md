@@ -63,7 +63,7 @@ as a `config` message.
 | `voice.enabled` | `true` | Off: the device's audio is ignored |
 | `voice.provider`, `voice.model` | `null` | The voice turn's model; `null` provider → the agent run's model |
 | `voice.languageHints` | `["en", "it"]` | Languages the speech-to-text expects (others are still detected) |
-| `voice.endOfTurnMs` | 300 | Silence after the device's last speech segment before the turn is finalised |
+| `voice.endOfTurnMs` | 700 | Silence after the device's last speech segment before the turn is finalised (300 until plan rev 19; migration 0024 moved devices still on 300) |
 | `voice.closeAfterSec` | 45 | The speech-to-text connection closes after this long without speech |
 | `tools.disabled` | `[]` | Device tools switched off: any of `speak`, `zoom`, `takePicture`, `searchObservations`. They leave the runs' and voice turns' tool sets, and the rules stop mentioning them |
 
@@ -191,16 +191,21 @@ spoken in the last hour, the last utterance).
 - **End of turn:** `voice.endOfTurnMs` after a segment ends, the session sends `finalize`; the words up to Soniox's
   `<fin>` are the turn, split into lines by voice ("voice 1: …", with the main language). Speech that resumes before
   `<fin>` joins the same turn. (Smart Turn is planned to decide instead of the fixed wait.)
-- **The turn:** a `<heard>` user message (day, time, the lines) in the device's conversation, then the reply,
+- **The turn:** a `<heard>` user message (day, time, notes, the lines) in the device's conversation, then the reply,
   streamed with the device's system prompt and tools (no `speak`: the reply is spoken). The agent answers when
   addressed, otherwise replies exactly `<silent/>`; the start of the reply is held until it can't be `<silent/>`.
+  Header notes (`heardNotes`): "in conversation: you spoke N s ago" within 30 s of the device's last spoken reply
+  (`CONVERSATION_WINDOW_MS`; the rules: answer it unless it's plainly not for you), and "talking over your reply".
   Each finished sentence is synthesised (Piper) and sent as its own `speech` clip, so the first audio leaves while
   the model still writes. Markup in a reply (a tool call written as text) is never spoken.
-- **Barge-in:** 400 ms of new speech while the device plays the reply stops the model and sends `stop_speech`; the
-  stored reply keeps the sentences that played, then "[interrupted]".
+- **Barge-in:** 400 ms of new speech while the device answers (the model writing it, or the device playing it)
+  stops the model and sends `stop_speech`. If some of it played, the stored reply keeps the sentences that played,
+  then "[interrupted]", and the next turn's header says "talking over your reply". If nothing played yet, the person
+  was still talking (a pause ended the turn early): the turn and its reply are dropped (status `merged`) and its
+  lines go in front of the next turn's, as one turn.
 - **Limits:** a voice reply skips the speech cooldown and hourly cap; mute and quiet hours still apply (the reply is
   stored, not spoken).
-- **Log:** a `voice` device event per turn (published live): status (`spoken`, `silent`, `interrupted`,
+- **Log:** a `voice` device event per turn (published live): status (`spoken`, `silent`, `interrupted`, `merged`,
   `not_spoken`, `failed`), what was heard, the reply, per-clip acks, tokens (cached included) and latencies from the
   end of speech (`final`, `request`, `firstToken`, `firstSentence`, `firstAudio`).
 - **Measured (2026-10-13, simulator over Soniox US, Haiku 5.5 on Vertex EU, Piper local):** first audio sent
@@ -277,6 +282,10 @@ It sends `hello`, telemetry every 30 s and a frame every interval (never faster 
 `paused`, answers `capture` requests (a region is cropped from the current frame), plays `speech` with `afplay` and
 answers `played`, and reconnects with backoff (1 → 30 s). For speech, run Piper: `docker compose up piper` and
 `PIPER_URL=http://localhost:5050`.
+
+Voice turns against a real model (answer or `<silent/>` in the cases that went wrong: a follow-up moments after a
+reply, a sentence split by a pause, talking over a reply, TV in the room): `OPENROUTER_API_KEY=… npm run test:ai --
+test/ai/voice-turns.test.ts`.
 
 Voice: `--speak a.wav,b.wav` streams each file as one stretch of speech in real time (`--interrupt` barges into the
 reply), `--mic` uses the Mac's microphone with an energy VAD (half duplex unless `--full-duplex`, with headphones).

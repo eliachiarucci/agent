@@ -169,6 +169,13 @@
       "when": 1791984965550,
       "tag": "0023_heavy_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791990360880,
+      "tag": "0024_voice_end_of_turn_700",
+      "breakpoints": true
     }
   ]
 }

@@ -17,7 +17,7 @@ vi.mock("../../lib/global/ai", async () => {
 vi.mock("../../lib/agent/context", () => ({
   getContextWindow: vi.fn(async () => ({ model: "test", contextLength: 1_000_000, supportsImages: true })),
 }));
-import { executeVoiceTurn, type VoiceTurnDeps } from "../../lib/agent/voice-turn";
+import { executeVoiceTurn, heardNotes, type VoiceTurnDeps } from "../../lib/agent/voice-turn";
 import { latestDeviceConversation } from "../../lib/db/conversations";
 import { createDevice, listDeviceEvents } from "../../lib/db/devices";
 import { withDeviceLock } from "../../lib/devices/lock";
@@ -78,6 +78,9 @@ describe("voice text", () => {
   it("speak only words, and format what was heard", () => {
     expect(speakable('<speak><parameter name="text">It\'s **9:10**.</parameter>')).toBe("It's 9:10.");
     expect(speakable("<silent/>")).toBe("");
+    expect(heardBlock("Tue 13 Oct, 21:10:08", [{ speaker: "voice 1", text: "Hi" }], ["in conversation: you spoke 4 s ago"])).toBe(
+      "<heard> Tue 13 Oct, 21:10:08 (in conversation: you spoke 4 s ago)\nvoice 1: Hi\n</heard>"
+    );
     expect(heardBlock("Tue 13 Oct, 21:10:08", [{ speaker: "voice 1", text: "Hey Dino", language: "en" }])).toBe(
       "<heard> Tue 13 Oct, 21:10:08\nvoice 1 (en): Hey Dino\n</heard>"
     );
@@ -271,16 +274,80 @@ describe("voice session", () => {
     }
   });
 
-  it("interrupt the reply after enough new speech", () => {
-    const { s } = session();
-    const interrupt = vi.fn();
-    s.reply = { speaking: () => true, interrupt };
-    s.onAudio(header("a", 0, { start: true }), pcm(200));
-    expect(interrupt).not.toHaveBeenCalled();
-    s.onAudio(header("a", 1), pcm(BARGE_IN_MS - 200));
-    expect(interrupt).toHaveBeenCalledOnce();
-    expect(s.reply).toBeNull();
-    s.close();
+  // One stretch of speech: start, audio, end; then the final text after the silence.
+  function speak(s: VoiceSession, stt: FakeStt, segment: string, ms: number, words: string[]) {
+    s.onAudio(header(segment, 0, { start: true }), pcm(ms));
+    s.onAudio(header(segment, 1, { end: true }), Buffer.alloc(0));
+    vi.advanceTimersByTime(voiceSettings.endOfTurnMs);
+    stt.emit("tokens", words.map((w) => final(w)), []);
+    stt.emit("fin");
+  }
+
+  it("interrupt the reply after enough new speech, and mark the next turn as talking over it", () => {
+    vi.useFakeTimers();
+    try {
+      const { s, stt, turns } = session();
+      const interrupt = vi.fn();
+      s.reply = { started: () => true, interrupt };
+      s.onAudio(header("a", 0, { start: true }), pcm(200));
+      expect(interrupt).not.toHaveBeenCalled();
+      s.onAudio(header("a", 1), pcm(BARGE_IN_MS - 200));
+      expect(interrupt).toHaveBeenCalledExactlyOnceWith(false);
+      expect(s.reply).toBeNull();
+      s.onAudio(header("a", 2, { end: true }), Buffer.alloc(0));
+      vi.advanceTimersByTime(voiceSettings.endOfTurnMs);
+      stt.emit("tokens", [final("No, the other one.")], []);
+      stt.emit("fin");
+      expect(turns[0]).toMatchObject({ afterInterruption: true, lines: [{ text: "No, the other one." }] });
+      expect(turns[0].continued).toBeUndefined();
+      s.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("merge a turn into the next one when the person goes on before its reply played", () => {
+    vi.useFakeTimers();
+    try {
+      const { s, stt, turns } = session();
+      speak(s, stt, "a", 1500, ["You know that's not a couch, right?"]);
+      expect(turns).toHaveLength(1);
+      // The reply is being written (nothing sent yet) when they go on talking.
+      const interrupt = vi.fn();
+      s.reply = { started: () => false, interrupt };
+      speak(s, stt, "b", 900, [" It's like a sofa bed."]);
+      expect(interrupt).toHaveBeenCalledExactlyOnceWith(true);
+      expect(turns).toHaveLength(2);
+      expect(turns[1].lines).toEqual([
+        { speaker: "voice 1", text: "You know that's not a couch, right? It's like a sofa bed.", language: "en" },
+      ]);
+      expect(turns[1]).toMatchObject({ continued: true });
+      expect(turns[1].afterInterruption).toBeUndefined();
+
+      // Speech with no words in it still hands the dropped turn back, alone.
+      s.reply = { started: () => false, interrupt: vi.fn() };
+      speak(s, stt, "c", 600, []);
+      expect(turns[2].lines.map((l) => l.text)).toEqual(["You know that's not a couch, right? It's like a sofa bed."]);
+      s.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tell how long ago the device spoke, for the conversation window", () => {
+    vi.useFakeTimers();
+    try {
+      const { s, stt, turns } = session();
+      speak(s, stt, "a", 600, ["Hey Dino."]);
+      expect(turns[0].sinceReplyMs).toBeNull();
+      s.replied(Date.now());
+      vi.advanceTimersByTime(8000);
+      speak(s, stt, "b", 600, ["Don't you trust me?"]);
+      expect(turns[1].sinceReplyMs).toBe(8000 + voiceSettings.endOfTurnMs);
+      s.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -486,7 +553,7 @@ describe("voice turn", () => {
     const { d, stops } = deps(streamingModel("Once upon a time, a cat. She lived by the shed. The end."), sent, {
       // Barge in while the second sentence plays.
       onPlay: (n) => {
-        if (n === 2) voiceSessions.get(device.id)!.reply!.interrupt();
+        if (n === 2) voiceSessions.get(device.id)!.reply!.interrupt(false);
       },
     });
     expect(await executeVoiceTurn(device.id, turn("Dino, tell me a story."), d)).toBe("interrupted");
@@ -496,5 +563,33 @@ describe("voice turn", () => {
       "assistant: Once upon a time, a cat. [interrupted]"
     );
     voiceSessions.drop(device.id);
+  });
+
+  it("keep nothing of a turn whose reply was dropped for the next turn", async () => {
+    const device = await makeDevice();
+    voiceSessions.setDeps({ openStt: () => new FakeStt() });
+    voiceSessions.onAudio(device.id, device.ownerId, () => voiceSettings, header("a", 0, { start: true }), pcm(100));
+    const sent: string[] = [];
+    const { d } = deps(streamingModel("A couch is a long seat with a back and arms, for two or more people."), sent);
+    // They go on talking while the reply is still being written.
+    setTimeout(() => voiceSessions.get(device.id)!.reply!.interrupt(true), 15);
+    expect(await executeVoiceTurn(device.id, turn("You know that's not a couch, right?"), d)).toBe("merged");
+    expect(sent).toEqual([]);
+    const conversation = await latestDeviceConversation(device.id);
+    expect(conversation!.messages).toEqual([]);
+    voiceSessions.drop(device.id);
+  });
+
+  it("note in the heard header that it's a conversation, or that they talked over the reply", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    const { d } = deps(streamingModel("I do trust you."), sent);
+    const t = { ...turn("Why would it take my word? Don't you trust me?"), sinceReplyMs: 18_000, afterInterruption: true };
+    expect(await executeVoiceTurn(device.id, t, d)).toBe("spoken");
+    const conversation = await latestDeviceConversation(device.id);
+    expect(lastTexts(conversation!.messages as UIMessage[])[0]).toMatch(
+      /^user: <heard> .+ \(talking over your reply; in conversation: you spoke 18 s ago\)\n/
+    );
+    expect(heardNotes({ ...turn("x"), sinceReplyMs: 31_000 })).toEqual([]);
   });
 });

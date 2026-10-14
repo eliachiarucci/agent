@@ -92,10 +92,10 @@ export function speakable(text: string): string {
 
 export type HeardLine = { speaker: string; text: string; language?: string };
 
-/** The user message of a voice turn. */
-export function heardBlock(time: string, lines: HeardLine[]): string {
+/** The user message of a voice turn; notes go in the header, e.g. "in conversation: you spoke 8 s ago". */
+export function heardBlock(time: string, lines: HeardLine[], notes: string[] = []): string {
   return [
-    `${HEARD_OPEN} ${time}`,
+    `${HEARD_OPEN} ${time}${notes.length ? ` (${notes.join("; ")})` : ""}`,
     ...lines.map((l) => `${l.speaker}${l.language ? ` (${l.language})` : ""}: ${l.text}`),
     HEARD_CLOSE,
   ].join("\n");

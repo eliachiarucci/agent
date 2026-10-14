@@ -31,15 +31,13 @@ describe.skipIf(!FRAMES || !modelReady)("perception on real frames", () => {
     const names = (await readdir(FRAMES!)).filter((n) => /\.jpe?g$/i.test(n) && n.includes(MATCH)).sort();
     expect(names.length).toBeGreaterThan(0);
 
+    // An OpenRouter endpoint pin is part of the model id ("model@endpoint").
+    const modelId = ROUTE ? `${MODEL}@${ROUTE}` : MODEL;
     const target = {
       provider: PROVIDER,
-      modelId: MODEL,
-      model: buildPerceptionModel(PROVIDER, { url: LMSTUDIO_URL, apiKey: API_KEY }, MODEL),
-      providerOptions: perceptionProviderOptions(
-        PROVIDER,
-        MODEL,
-        ROUTE ? { only: [ROUTE], allowFallbacks: false } : null
-      ),
+      modelId,
+      model: buildPerceptionModel(PROVIDER, { url: LMSTUDIO_URL, apiKey: API_KEY }, modelId),
+      providerOptions: perceptionProviderOptions(PROVIDER, modelId),
     };
 
     let previous: Caption | null = null;

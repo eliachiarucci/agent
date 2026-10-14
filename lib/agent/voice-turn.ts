@@ -17,7 +17,7 @@ import { deviceTimeZone, readDeviceSettings, type DeviceSettings } from "../devi
 import { inQuietHours } from "../devices/speech-policy";
 import { localDayLabel, localTime } from "../devices/time";
 import { resolveVoice, synthesize } from "../devices/tts";
-import { voiceSessions, type HeardTurn } from "../devices/voice/session";
+import { CONVERSATION_WINDOW_MS, voiceSessions, type HeardTurn } from "../devices/voice/session";
 import { SentenceSplitter, SilenceGate, heardBlock, speakable } from "../devices/voice/text";
 import { applyCompaction, planChatCompaction, usageTokens } from "./compaction";
 import {
@@ -49,7 +49,17 @@ import { deviceDescription } from "../devices/observation-tools";
 const IMAGE_WINDOW = 2;
 const MAX_STEPS = 4;
 
-export type VoiceTurnStatus = "spoken" | "silent" | "interrupted" | "not_spoken" | "failed" | "no_agent" | "no_model";
+// merged: the person went on talking before any of the reply played; the turn
+// went in front of their next one and isn't kept on its own.
+export type VoiceTurnStatus =
+  | "spoken"
+  | "silent"
+  | "interrupted"
+  | "merged"
+  | "not_spoken"
+  | "failed"
+  | "no_agent"
+  | "no_model";
 
 export type VoiceTurnDeps = DeviceRunDeps & {
   synthesize: typeof synthesize;
@@ -90,7 +100,11 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
   if (!device) return null;
   const settings = readDeviceSettings(device.settings);
   const timeZone = deviceTimeZone(settings);
-  const heard = heardBlock(`${localDayLabel(turn.at, timeZone)}, ${localTime(turn.at, timeZone, true)}`, turn.lines);
+  const heard = heardBlock(
+    `${localDayLabel(turn.at, timeZone)}, ${localTime(turn.at, timeZone, true)}`,
+    turn.lines,
+    heardNotes(turn)
+  );
   const started = deps.now().getTime();
   const marks: Record<string, number> = { final: turn.finalAt - turn.speechEndAt };
   const mark = (name: string) => {
@@ -172,12 +186,14 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
 
   const abort = new AbortController();
   let interrupted = false;
+  let merged = false;
   const session = voiceSessions.get(deviceId);
   if (session) {
     session.reply = {
-      speaking: () => speaker.speaking,
-      interrupt: () => {
+      started: () => speaker.started,
+      interrupt: (intoNext) => {
         interrupted = true;
+        merged = intoNext;
         abort.abort();
         speaker.stop();
       },
@@ -257,6 +273,13 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
     }
     const played = await speaker.finish();
 
+    // Nothing was played: the session puts these words in front of the next
+    // turn, so this exchange isn't kept (the next one holds it all).
+    if (merged) {
+      await updateMessage(conversationId, { messages: history.slice(0, -1) });
+      return record("merged", { conversationId });
+    }
+
     const silent = gate.state === "silent";
     const spokenText = played.filter((p) => p.ok).map((p) => p.text).join(" ");
     const storedText = silent
@@ -307,6 +330,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       }).catch((error) => console.warn(`[memory] voice extraction failed: ${error}`));
     }
 
+    if (session && spokenText) session.replied(deps.now().getTime());
     const status: VoiceTurnStatus = silent
       ? "silent"
       : interrupted
@@ -341,6 +365,16 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
   }
 }
 
+/** What the <heard> header says about the conversation (the rules explain both). */
+export function heardNotes(turn: HeardTurn): string[] {
+  const notes: string[] = [];
+  if (turn.afterInterruption) notes.push("talking over your reply");
+  if (turn.sinceReplyMs != null && turn.sinceReplyMs <= CONVERSATION_WINDOW_MS) {
+    notes.push(`in conversation: you spoke ${Math.max(1, Math.round(turn.sinceReplyMs / 1000))} s ago`);
+  }
+  return notes;
+}
+
 function mainLanguage(turn: HeardTurn): string | undefined {
   const counts = new Map<string, number>();
   for (const l of turn.lines) if (l.language) counts.set(l.language, (counts.get(l.language) ?? 0) + l.text.length);
@@ -366,9 +400,9 @@ class ReplySpeaker {
     private readonly onFirstAudio: () => void
   ) {}
 
-  /** From the first chunk sent until every chunk is acknowledged. */
-  get speaking(): boolean {
-    return this.sent && this.pending > 0;
+  /** Some of the reply was sent to the device. */
+  get started(): boolean {
+    return this.sent;
   }
 
   say(sentence: string): void {

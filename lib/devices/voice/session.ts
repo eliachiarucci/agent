@@ -7,7 +7,14 @@ import type { HeardLine } from "./text";
 // VAD goes to streaming STT; when the device has been silent for endOfTurnMs
 // after a stretch of speech, the session asks STT to finalise and hands the
 // turn (what was said, split by voice) to the voice-turn handler. New speech
-// while the device is talking back interrupts the reply (barge-in).
+// while the device answers interrupts the reply (barge-in). Before any of the
+// reply was played, the person was still talking (a pause mid-sentence ended
+// the turn too early): the reply is dropped and the turn's words go in front
+// of what they say next, as one turn. After some of it was played, the next
+// turn is marked as talking over the reply.
+
+/** Within this long after the device spoke, speech is taken as part of the conversation. */
+export const CONVERSATION_WINDOW_MS = 30_000;
 
 export type HeardTurn = {
   lines: HeardLine[];
@@ -16,10 +23,21 @@ export type HeardTurn = {
   speechEndAt: number;
   finalAt: number;
   audioMs: number;
+  // The lines start with a turn whose reply was dropped before it played (see above).
+  continued?: boolean;
+  // This speech talked over the device's reply, after some of it was played.
+  afterInterruption?: boolean;
+  // Since the device last spoke a reply (ms); null if it hasn't in this session.
+  sinceReplyMs?: number | null;
 };
 
-/** The reply being spoken, for barge-in. */
-export type ActiveReply = { speaking: () => boolean; interrupt: () => void };
+/** The reply being worked on (generated or spoken), for barge-in. */
+export type ActiveReply = {
+  // Some of it was sent to the device.
+  started: () => boolean;
+  // merged: nothing was played, so the turn goes in front of the next one.
+  interrupt: (merged: boolean) => void;
+};
 
 export type TurnHandler = (deviceId: string, turn: HeardTurn) => void;
 
@@ -48,6 +66,12 @@ export class VoiceSession {
   private endTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private noKeyUntil = 0;
+  // The last turn handed over, the words carried into the next turn, and whether
+  // the speech being collected talked over a reply.
+  private lastLines: HeardLine[] = [];
+  private carry: HeardLine[] = [];
+  private talkedOver = false;
+  private lastReplyAt: number | null = null;
   reply: ActiveReply | null = null;
 
   constructor(
@@ -77,10 +101,13 @@ export class VoiceSession {
       this.segmentMs += ms;
       this.turnAudioMs += ms;
     }
-    if (this.reply?.speaking() && this.segmentOpen && this.segmentMs >= BARGE_IN_MS) {
+    if (this.reply && this.segmentOpen && this.segmentMs >= BARGE_IN_MS) {
       const reply = this.reply;
       this.reply = null;
-      reply.interrupt();
+      const merged = !reply.started();
+      if (merged) this.carry = mergeLines(this.carry, this.lastLines);
+      else this.talkedOver = true;
+      reply.interrupt(merged);
     }
     if (header.end) {
       this.segmentOpen = false;
@@ -93,6 +120,11 @@ export class VoiceSession {
       }, voice.endOfTurnMs);
     }
     this.resetIdle(voice.closeAfterSec);
+  }
+
+  /** The device finished speaking a reply (or was cut off after part of it). */
+  replied(at: number): void {
+    this.lastReplyAt = at;
   }
 
   close(): void {
@@ -131,17 +163,28 @@ export class VoiceSession {
     this.finalizing = false;
     // Speech resumed after finalize: keep collecting; the next silence finalises again.
     if (this.resumed || this.segmentOpen) return;
-    const lines = linesFromTokens(this.finals);
+    const heard = linesFromTokens(this.finals);
     const audioMs = this.turnAudioMs;
     this.finals = [];
     this.turnAudioMs = 0;
+    // A carried turn goes out even if the speech that cut its reply had no words.
+    const lines = mergeLines(this.carry, heard);
     if (lines.length === 0) return;
+    const continued = this.carry.length > 0;
+    const afterInterruption = this.talkedOver;
+    this.carry = [];
+    this.talkedOver = false;
+    this.lastLines = lines;
+    const now = this.deps.now();
     this.onTurn()?.(this.deviceId, {
       lines,
       at: new Date(),
       speechEndAt: this.speechEndAt,
-      finalAt: this.deps.now(),
+      finalAt: now,
       audioMs: Math.round(audioMs),
+      ...(continued && { continued }),
+      ...(afterInterruption && { afterInterruption }),
+      sinceReplyMs: this.lastReplyAt === null ? null : now - this.lastReplyAt,
     });
   }
 
@@ -154,6 +197,17 @@ export class VoiceSession {
       this.stt = null;
     }, closeAfterSec * 1000);
   }
+}
+
+/** Lines followed by more lines, joining the same voice across the seam. */
+export function mergeLines(first: HeardLine[], then: HeardLine[]): HeardLine[] {
+  const out = first.map((l) => ({ ...l }));
+  for (const line of then) {
+    const last = out.at(-1);
+    if (last && last.speaker === line.speaker) last.text = `${last.text} ${line.text}`;
+    else out.push({ ...line });
+  }
+  return out;
 }
 
 /** Final tokens → one line per stretch of a single voice, with its main language. */

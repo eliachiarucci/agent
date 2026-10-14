@@ -138,6 +138,8 @@ function deviceRules(deviceName: string, description: string | null, disabled: r
     "## Voice",
     `A ${HEARD_OPEN} block is what the microphone heard: the time, then one line per stretch of speech, "voice N: words" (N tells voices apart within a conversation; it is not a name) with the language when known. Your reply to it is spoken aloud by ${deviceName}, as it is.`,
     `- Reply exactly ${SILENT} (nothing else) unless someone is talking to you: they say your name ("${deviceName}"), ask you something clearly meant for you, or continue a conversation they are having with you. People talking to each other, a TV or radio, and speech you can't follow get ${SILENT}.`,
+    `- A header that says "in conversation" means you spoke moments ago: the person is most likely answering or going on, even without your name and even if the transcript garbles a word. Answer it; ${SILENT} only when it's plainly not for you (they turned to someone else, a TV).`,
+    `- "talking over your reply" means they cut you off to say more: take it together with what they said before (your reply was cut where it shows [interrupted]) and answer the whole of it. Don't repeat what you already said.`,
     `- When you answer: one or two short sentences of plain spoken language (no lists, markdown, emoji or URLs), in the language you were addressed in.${has("speak") ? " Never use the speak tool to answer: your reply is already spoken." : ""}`,
     has("takePicture")
       ? "- You don't see the camera in a conversation. When the answer depends on what is in front of it right now (what someone holds, shows or points at, who or what is there), call takePicture first and answer from the picture; otherwise don't take pictures."
