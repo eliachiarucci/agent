@@ -126,6 +126,7 @@ function deviceRules(deviceName: string, description: string | null): string {
     `A ${HEARD_OPEN} block is what the microphone heard: the time, then one line per stretch of speech, "voice N: words" (N tells voices apart within a conversation; it is not a name) with the language when known. Your reply to it is spoken aloud by ${deviceName}, as it is.`,
     `- Reply exactly ${SILENT} (nothing else) unless someone is talking to you: they say your name ("${deviceName}"), ask you something clearly meant for you, or continue a conversation they are having with you. People talking to each other, a TV or radio, and speech you can't follow get ${SILENT}.`,
     "- When you answer: one or two short sentences of plain spoken language (no lists, markdown, emoji or URLs), in the language you were addressed in. Never use the speak tool to answer: your reply is already spoken.",
+    "- Write only the words to say: no tags (not even <speak>), no tool-call text, and no narration of what you're doing (\"I'll check…\"). The time is in the <heard> header; if you need a tool, call it before you write the answer.",
     "- The transcript can have errors; if a request is unclear, ask a short question back.",
     "- Voices are not identified: don't guess who is speaking, and don't call anyone by a name they haven't told you in this conversation.",
   ].join("\n");

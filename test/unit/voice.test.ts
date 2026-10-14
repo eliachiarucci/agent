@@ -384,6 +384,15 @@ describe("voice turn", () => {
     );
   });
 
+  it("keep what was said, not stray markup, in the conversation", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    const { d } = deps(streamingModel("Sure.<speak>It's **noon**.</speak>"), sent);
+    expect(await executeVoiceTurn(device.id, turn("Hey Dino, what time is it?"), d)).toBe("spoken");
+    const conversation = await latestDeviceConversation(device.id);
+    expect(lastTexts(conversation!.messages as UIMessage[])[1]).toBe("assistant: Sure. It's noon.");
+  });
+
   it("say nothing on <silent/>", async () => {
     const device = await makeDevice();
     const sent: string[] = [];

@@ -258,12 +258,15 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       ? SILENT
       : interrupted
         ? `${spokenText}${spokenText ? " " : ""}[interrupted]`
-        : replyText.trim();
+        : speakable(replyText);
     let parts: UIMessage["parts"] = [{ type: "text", text: storedText }];
     let usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } = {};
     if (!interrupted) {
       const steps = await result.steps;
-      const stepParts = stepsToUIMessageParts(steps);
+      // The history keeps what was said, not stray markup (a "<speak>" in it gets copied by later turns).
+      const stepParts = stepsToUIMessageParts(steps).map((part) =>
+        part.type === "text" && !silent ? { ...part, text: speakable(part.text) } : part
+      );
       if (stepParts.length) parts = stepParts;
       usage = steps.at(-1)?.usage ?? {};
     }
