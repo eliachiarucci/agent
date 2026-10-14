@@ -5,7 +5,16 @@
 //
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --dir ../rover2/radxa_software/captures/bench-20261011/frames --match 2576x1449
 //   DEVICE_TOKEN=dev_… npm run device-sim -- --files empty.jpg,empty.jpg,person.jpg --no-loop
-//   DEVICE_TOKEN=dev_… npm run device-sim -- --webcam [--camera 0] [--size 1280x720]
+//   DEVICE_TOKEN=dev_… npm run device-sim -- --webcam [--camera C922] [--size 1280x720]
+//   DEVICE_TOKEN=dev_… npm run device-sim -- --url wss://…/agent/devices/ws     (asks for camera and mic)
+//
+// Devices (macOS, ffmpeg avfoundation): run in a terminal with no frame source
+// and no --speak/--mic, and it asks which camera and microphone to use (either
+// can be "none"); --webcam or --mic alone asks for just that one. --camera and
+// --mic-device take a name or part of one ("arctis"), an ffmpeg index, or
+// "default" (macOS's default device, also what's used outside a terminal).
+// --list-devices prints them. Names are passed to ffmpeg, so a device keeps
+// working when others are plugged in or out (indexes shift).
 //
 // Options: --url (default ws://localhost:3001/agent/devices/ws); --interval,
 // seconds between frames (default 2; never faster than the server's
@@ -31,6 +40,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { emitKeypressEvents } from "node:readline";
 import { parseArgs } from "node:util";
 import sharp from "sharp";
 import WebSocket from "ws";
@@ -44,22 +54,140 @@ const { values: args } = parseArgs({
     "no-loop": { type: "boolean", default: false },
     match: { type: "string", default: "" },
     webcam: { type: "boolean", default: false },
-    camera: { type: "string", default: "0" },
+    camera: { type: "string" },
     size: { type: "string", default: "1280x720" },
     interval: { type: "string", default: "2" },
     speak: { type: "string" },
     "speak-gap": { type: "string", default: "2" },
     interrupt: { type: "boolean", default: false },
     mic: { type: "boolean", default: false },
-    "mic-device": { type: "string", default: "0" },
+    "mic-device": { type: "string" },
     "full-duplex": { type: "boolean", default: false },
+    "list-devices": { type: "boolean", default: false },
   },
 });
 
+// ── capture devices (ffmpeg avfoundation) ──────────────────────────────────
+
+type AvDevice = { index: number; name: string };
+
+/** The cameras and microphones ffmpeg can open, from its device listing. Screens aren't cameras. */
+async function listAvDevices(): Promise<{ video: AvDevice[]; audio: AvDevice[] }> {
+  const out = await new Promise<string>((resolve, reject) => {
+    const ff = spawn("ffmpeg", ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let text = "";
+    ff.stderr.on("data", (d: Buffer) => (text += d.toString()));
+    ff.on("error", reject);
+    ff.on("exit", () => resolve(text));
+  });
+  const video: AvDevice[] = [];
+  const audio: AvDevice[] = [];
+  let list: AvDevice[] | null = null;
+  for (const line of out.split("\n")) {
+    if (/video devices:/i.test(line)) list = video;
+    else if (/audio devices:/i.test(line)) list = audio;
+    const m = /\] \[(\d+)\] (.+)$/.exec(line);
+    if (m && list && !/^Capture screen/i.test(m[2])) list.push({ index: Number(m[1]), name: m[2].trim() });
+  }
+  return { video, audio };
+}
+
+/** A device from --camera / --mic-device: a name or part of one, an index, or "default". */
+function findDevice(devices: AvDevice[], spec: string, kind: string): string {
+  if (spec === "default") return "default";
+  const byIndex = /^\d+$/.test(spec) ? devices.find((d) => d.index === Number(spec)) : undefined;
+  const matches = byIndex ? [byIndex] : devices.filter((d) => d.name.toLowerCase().includes(spec.toLowerCase()));
+  if (matches.length === 1) return matches[0].name;
+  const list = devices.map((d) => `  ${d.index}  ${d.name}`).join("\n");
+  fail(`${matches.length ? "Several" : "No"} ${kind}s match "${spec}". Available:\n${list}`);
+}
+
+/** Arrow-key menu on the terminal; returns the chosen option's index. */
+function choose(title: string, options: string[]): Promise<number> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    let cursor = 0;
+    emitKeypressEvents(stdin);
+    stdin.setRawMode(true);
+    stdin.resume();
+    const draw = (first: boolean) => {
+      if (!first) process.stdout.write(`\x1b[${options.length + 1}A`);
+      process.stdout.write(`\x1b[2K${title} \x1b[2m(↑/↓, enter)\x1b[0m\n`);
+      options.forEach((o, i) =>
+        process.stdout.write(`\x1b[2K${i === cursor ? "\x1b[32m❯\x1b[0m \x1b[1m" + o + "\x1b[0m" : "  " + o}\n`)
+      );
+    };
+    const onKey = (_s: string, key: { name?: string; ctrl?: boolean }) => {
+      if (key?.ctrl && key.name === "c") process.exit(130);
+      if (key?.name === "up") cursor = (cursor - 1 + options.length) % options.length;
+      else if (key?.name === "down") cursor = (cursor + 1) % options.length;
+      else if (key?.name === "return") {
+        stdin.removeListener("keypress", onKey);
+        stdin.setRawMode(false);
+        stdin.pause();
+        return resolve(cursor);
+      } else return;
+      draw(false);
+    };
+    stdin.on("keypress", onKey);
+    draw(true);
+  });
+}
+
+/** Asks for one device (or none, when allowed). Returns its name, "default", or null for none. */
+async function pickDevice(devices: AvDevice[], kind: string, allowNone: boolean): Promise<string | null> {
+  const options = [...devices.map((d) => d.name), `macOS default ${kind}`, ...(allowNone ? [`No ${kind}`] : [])];
+  const i = await choose(`Which ${kind}?`, options);
+  if (i < devices.length) return devices[i].name;
+  return i === devices.length ? "default" : null;
+}
+
+if (args["list-devices"]) {
+  const { video, audio } = await listAvDevices();
+  console.log("Cameras:\n" + video.map((d) => `  ${d.index}  ${d.name}`).join("\n"));
+  console.log("Microphones:\n" + audio.map((d) => `  ${d.index}  ${d.name}`).join("\n"));
+  process.exit(0);
+}
+
 const token = process.env.DEVICE_TOKEN;
 if (!token) fail("Set DEVICE_TOKEN to the token from POST /agent/devices.");
+
+// Which camera and microphone: given by name or index, asked for in a terminal, or macOS's defaults.
+const interactive = process.stdin.isTTY && process.stdout.isTTY;
+let cameraName: string | null = null;
+let micName: string | null = null;
+{
+  const askBoth = interactive && !args.dir && !args.files && !args.webcam && !args.speak && !args.mic;
+  const wantCamera = askBoth || args.webcam || args.camera !== undefined;
+  const wantMic = askBoth || args.mic || args["mic-device"] !== undefined;
+  if (wantCamera || wantMic) {
+    const { video, audio } = await listAvDevices();
+    if (wantCamera) {
+      cameraName =
+        args.camera !== undefined
+          ? findDevice(video, args.camera, "camera")
+          : interactive
+            ? await pickDevice(video, "camera", askBoth)
+            : "default";
+    }
+    if (wantMic) {
+      micName =
+        args["mic-device"] !== undefined
+          ? findDevice(audio, args["mic-device"], "microphone")
+          : interactive
+            ? await pickDevice(audio, "microphone", askBoth)
+            : "default";
+    }
+  }
+  if (cameraName) args.webcam = true;
+  if (micName) args.mic = true;
+}
+
 const frameSources = [args.dir, args.files, args.webcam].filter(Boolean).length;
 const voice = !!(args.speak || args.mic);
+if (frameSources === 0 && !voice && interactive) fail("No camera and no microphone: nothing to stream.");
 if (frameSources > 1 || (frameSources === 0 && !voice)) {
   fail("Pick one frame source (--dir, --files or --webcam), and/or --speak / --mic.");
 }
@@ -114,10 +242,16 @@ function webcamSource(camera: string, size: string): Source {
     "ffmpeg",
     ["-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-framerate", "30", "-video_size", size,
      "-i", `${camera}:none`, "-vf", "fps=5", "-c:v", "mjpeg", "-q:v", "3", "-f", "image2pipe", "-"],
-    { stdio: ["ignore", "pipe", "inherit"] }
+    { stdio: ["ignore", "pipe", "pipe"] }
   );
+  // avfoundation reports its pixel-format negotiation as errors, then picks a supported one: drop those lines.
+  ffmpeg.stderr.on("data", (d: Buffer) => {
+    const lines = d.toString().split("\n").filter((l) => l.trim() && !/pixel format|^\[in#\d+ @ [^\]]+\]\s+\w+$/.test(l));
+    if (lines.length) process.stderr.write(lines.join("\n") + "\n");
+  });
   ffmpeg.on("error", (error) => fail(`ffmpeg failed to start: ${error.message}`));
   ffmpeg.on("exit", (code) => fail(`ffmpeg exited with code ${code} (camera permission for this terminal?)`));
+  console.log(`Camera: ${camera === "default" ? "the macOS default camera" : camera} (${size})`);
   ffmpeg.stdout.on("data", (chunk: Buffer) => {
     pending = Buffer.concat([pending, chunk]);
     // A JPEG runs from SOI (FF D8) to EOI (FF D9); the encoder never emits FF D9 inside the data.
@@ -130,7 +264,6 @@ function webcamSource(camera: string, size: string): Source {
     }
   });
   process.on("exit", () => ffmpeg.kill());
-  console.log(`Streaming webcam ${camera} at ${size}`);
   return { next: async () => latest, current: async () => latest };
 }
 
@@ -360,7 +493,7 @@ async function runSpeakScript(files: string[]): Promise<void> {
 function startMic(): void {
   const ff = spawn(
     "ffmpeg",
-    ["-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", `:${args["mic-device"]}`, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+    ["-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", `:${micName ?? "default"}`, "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
     { stdio: ["ignore", "pipe", "inherit"] }
   );
   ff.on("exit", (code) => fail(`ffmpeg (mic) exited with code ${code} (microphone permission for this terminal?)`));
@@ -406,7 +539,8 @@ function startMic(): void {
       }
     }
   });
-  console.log(`Listening on microphone ${args["mic-device"]}${args["full-duplex"] ? " (full duplex)" : ""}`);
+  const micLabel = (micName ?? "default") === "default" ? "the macOS default microphone" : micName;
+  console.log(`Microphone: ${micLabel}${args["full-duplex"] ? " (full duplex)" : " (muted while a reply plays; --full-duplex with headphones)"}`);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -421,7 +555,7 @@ const source: Source = args.dir
   : args.files
     ? listSource(args.files.split(",").filter(Boolean), "--files")
     : args.webcam
-      ? webcamSource(args.camera!, args.size!)
+      ? webcamSource(cameraName ?? "default", args.size!)
       : { next: async () => null, current: async () => null };
 connect(source);
 if (args.speak) void runSpeakScript(args.speak.split(",").filter(Boolean));
