@@ -10,7 +10,8 @@
 //
 // Devices (macOS, ffmpeg avfoundation): run in a terminal with no frame source
 // and no --speak/--mic, and it asks which camera and microphone to use (either
-// can be "none"); --webcam or --mic alone asks for just that one. --camera and
+// can be "none"), then whether you wear headphones (yes = --full-duplex, so
+// you can talk over a reply); --webcam or --mic alone asks for just that one. --camera and
 // --mic-device take a name or part of one ("arctis"), an ffmpeg index, or
 // "default" (macOS's default device, also what's used outside a terminal).
 // --list-devices prints them. Names are passed to ffmpeg, so a device keeps
@@ -183,6 +184,15 @@ let micName: string | null = null;
   }
   if (cameraName) args.webcam = true;
   if (micName) args.mic = true;
+  // Talking over a reply (barge-in) needs the mic open while it plays, which is
+  // only safe with headphones: from speakers the reply would interrupt itself.
+  if (micName && interactive && !args["full-duplex"] && args["mic-device"] === undefined) {
+    const i = await choose("Wearing headphones?", [
+      "Yes: keep the mic open, so I can talk over Dino",
+      "No: mute the mic while Dino talks",
+    ]);
+    args["full-duplex"] = i === 0;
+  }
 }
 
 const frameSources = [args.dir, args.files, args.webcam].filter(Boolean).length;

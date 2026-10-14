@@ -145,7 +145,7 @@ spoken in the last hour, the last utterance).
   `<relevant-memories>` block, a `<device-context>` block with the time, the triggers, the captions since the last
   run and recent speech, and the newest frame copied into the log's uploads) and the agent's reply. Frames older
   than the last two runs reach the model as their caption (`windowImageParts`), so the prefix stays cacheable.
-- **Tools:** memory tools (stores with `source = "device"`), `speak`, `zoom` (a full-resolution crop of a region,
+- **Tools:** memory tools (stores with `source = "device"`), `speak`, `takePicture` (a fresh frame from the device, downscaled to 1568 px, saved in the conversation's uploads and shown to the model as an image right after the tool's result, through `prepareStep` (`lib/agent/pictures.ts`): OpenAI-compatible providers turn image tool results into JSON text), `zoom` (a full-resolution crop of a region,
   answered by the perception model, kept in the log's uploads), `searchObservations`, `getDate`, notes. No web
   search, connectors or scheduling: the camera is untrusted input. 6 steps at most.
 - **Identity:** the camera never identifies anyone. The run's prompt forbids naming people in view, even as one of the

@@ -21,6 +21,9 @@ import { executeVoiceTurn, type VoiceTurnDeps } from "../../lib/agent/voice-turn
 import { latestDeviceConversation } from "../../lib/db/conversations";
 import { createDevice, listDeviceEvents } from "../../lib/db/devices";
 import { withDeviceLock } from "../../lib/devices/lock";
+import { writeFrame } from "../../lib/devices/frames";
+import { TakenPictures } from "../../lib/agent/pictures";
+import sharp from "sharp";
 import type { AudioHeader } from "../../lib/devices/protocol";
 import { DEFAULT_DEVICE_SETTINGS, mergeDeviceSettings } from "../../lib/devices/settings";
 import { generateDeviceToken } from "../../lib/devices/tokens";
@@ -134,6 +137,22 @@ const header = (segment: string, seq: number, flags: Partial<AudioHeader> = {}):
 });
 const pcm = (ms: number) => Buffer.alloc(ms * 32);
 const final = (text: string, speaker = "1"): SttToken => ({ text, speaker, language: "en", isFinal: true });
+
+describe("taken pictures", () => {
+  it("go right after the tool message holding their result", () => {
+    const pictures = new TakenPictures();
+    pictures.add("b", { image: new Uint8Array([1]), label: "picture" });
+    const messages = [
+      { role: "user" as const, content: "hi" },
+      { role: "assistant" as const, content: [{ type: "tool-call" as const, toolCallId: "b", toolName: "takePicture", input: {} }] },
+      { role: "tool" as const, content: [{ type: "tool-result" as const, toolCallId: "b", toolName: "takePicture", output: { type: "json" as const, value: {} } }] },
+      { role: "assistant" as const, content: "ok" },
+    ];
+    const out = pictures.insert(messages);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user", "assistant"]);
+    expect(new TakenPictures().prepareStep({ messages })).toEqual({});
+  });
+});
 
 describe("the Soniox key", () => {
   it("fails a stream without a key, without connecting", async () => {
@@ -382,6 +401,61 @@ describe("voice turn", () => {
     expect(Object.keys(event.detail?.latencyMs as object)).toEqual(
       expect.arrayContaining(["final", "request", "firstToken", "firstSentence", "firstAudio"])
     );
+  });
+
+  it("take a picture when asked what's in view, and show it to the model after the tool's result", async () => {
+    const device = await makeDevice();
+    const sent: string[] = [];
+    const frame = await writeFrame(
+      device.id,
+      await sharp({ create: { width: 2576, height: 1449, channels: 3, background: "#884422" } }).jpeg().toBuffer()
+    );
+    const prompts: any[] = [];
+    const finish = {
+      type: "finish" as const,
+      finishReason: { unified: "stop" as const, raw: "stop" },
+      usage: {
+        inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 5, text: 5, reasoning: 0 },
+      },
+    };
+    const model = new MockLanguageModelV3({
+      provider: "mock",
+      modelId: "mock-voice",
+      doStream: async (options) => {
+        prompts.push(options.prompt);
+        const chunks =
+          prompts.length === 1
+            ? [
+                { type: "stream-start" as const, warnings: [] },
+                { type: "tool-call" as const, toolCallId: "call-1", toolName: "takePicture", input: "{}" },
+                { ...finish, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" } },
+              ]
+            : [
+                { type: "stream-start" as const, warnings: [] },
+                { type: "text-start" as const, id: "t" },
+                { type: "text-delta" as const, id: "t", delta: "A brown card." },
+                { type: "text-end" as const, id: "t" },
+                finish,
+              ];
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 1 }) };
+      },
+    });
+    const { d } = deps(model, sent);
+    d.capture = async () => ({ kind: "overview", observation: { frame } as any });
+    expect(await executeVoiceTurn(device.id, turn("Dino, what am I holding?"), d)).toBe("spoken");
+
+    // The second step sees the picture as an image, right after the tool's result, downscaled.
+    const second = prompts[1] as any[];
+    const toolAt = second.findIndex((m) => m.role === "tool");
+    const picture = second[toolAt + 1];
+    expect(picture.role).toBe("user");
+    const file = picture.content.find((p: any) => p.type === "file");
+    expect(file.mediaType).toBe("image/jpeg");
+    const meta = await sharp(Buffer.from(file.data)).metadata();
+    expect([meta.width, meta.height]).toEqual([1568, 882]);
+    const conversation = await latestDeviceConversation(device.id);
+    expect(lastTexts(conversation!.messages as UIMessage[]).at(-1)).toBe("assistant: A brown card.");
   });
 
   it("keep what was said, not stray markup, in the conversation", async () => {

@@ -31,6 +31,7 @@ import {
   type DeviceRunDeps,
 } from "./device-run";
 import { inlineImageFileParts, windowImageParts } from "./image-parts";
+import { TakenPictures } from "./pictures";
 import { buildMemorySystemPrompt, buildRelevantMemoriesBlock, type MemoryScope } from "./memory";
 import { runMemoryExtraction } from "./memory-extraction";
 import { withPromptCache } from "./prompt-cache";
@@ -192,6 +193,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       description: deviceDescription(device),
     });
     // No speak tool: the reply itself is spoken.
+    const pictures = new TakenPictures();
     const { speak: _speak, ...tools } = buildDeviceTools({
       device,
       settings,
@@ -201,6 +203,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       timeZone,
       agentId: agent.id,
       ownerId: owner.id,
+      pictures,
     });
     const modelView = await inlineImageFileParts(
       windowImageParts(applyCompaction(history, current?.compaction ?? null), IMAGE_WINDOW),
@@ -215,6 +218,7 @@ async function turnLocked(deviceId: string, turn: HeardTurn, deps: VoiceTurnDeps
       }),
       ...withPromptCache(system, modelMessages, runModel.provider === "anthropic"),
       tools,
+      prepareStep: pictures.prepareStep,
       providerOptions: runModel.providerOptions,
       stopWhen: stepCountIs(MAX_STEPS),
       abortSignal: abort.signal,
